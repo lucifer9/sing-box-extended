@@ -63,12 +63,13 @@ type InboundContext struct {
 
 	// sniffer
 
-	Protocol     string
-	Domain       string
-	Client       string
-	SniffContext any
-	SnifferNames []string
-	SniffError   error
+	Protocol      string
+	Domain        string // Also used for DNS reverse mappings during rule matching.
+	SniffedDomain string // Populated only by hostname-producing sniffers.
+	Client        string
+	SniffContext  any
+	SnifferNames  []string
+	SniffError    error
 
 	// cache
 
@@ -117,6 +118,11 @@ type InboundContext struct {
 	DestinationPortMatch         bool
 	DeferredIPCIDRMatchGroups    uint8
 	IgnoreDestinationIPCIDRMatch bool
+}
+
+func (c *InboundContext) SetSniffedDomain(domain string) {
+	c.Domain = domain
+	c.SniffedDomain = domain
 }
 
 func (c *InboundContext) ResetRuleCache() {

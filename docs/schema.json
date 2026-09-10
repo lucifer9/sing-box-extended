@@ -14865,6 +14865,9 @@
               "type": "string",
               "x-tag-reference": "outbound"
             },
+            "use_sniffed_destination": {
+              "type": "boolean"
+            },
             "override_address": {
               "type": "string"
             },
@@ -14917,7 +14920,25 @@
                 "wrong-timestamp"
               ]
             }
-          }
+          },
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "use_sniffed_destination": {
+                  "const": false
+                }
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "override_address": {
+                  "const": ""
+                }
+              }
+            }
+          ]
         },
         {
           "type": "object",

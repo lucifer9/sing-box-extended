@@ -56,12 +56,16 @@ func NewRuleAction(ctx context.Context, logger logger.ContextLogger, action opti
 	case "":
 		return nil, nil
 	case C.RuleActionTypeRoute:
+		if err := action.RouteOptions.Validate(); err != nil {
+			return nil, err
+		}
 		routeOptions, err := newRuleActionRouteOptions(action.RouteOptions.RawRouteOptionsActionOptions)
 		if err != nil {
 			return nil, err
 		}
 		return &RuleActionRoute{
 			Outbound:               action.RouteOptions.Outbound,
+			UseSniffedDestination:  action.RouteOptions.UseSniffedDestination,
 			RuleActionRouteOptions: routeOptions,
 		}, nil
 	case C.RuleActionTypeRouteOptions:
@@ -194,7 +198,8 @@ func NewDNSRuleAction(logger logger.ContextLogger, action option.DNSRuleAction) 
 }
 
 type RuleActionRoute struct {
-	Outbound string
+	Outbound              string
+	UseSniffedDestination bool
 	RuleActionRouteOptions
 }
 
@@ -205,6 +210,9 @@ func (r *RuleActionRoute) Type() string {
 func (r *RuleActionRoute) String() string {
 	var descriptions []string
 	descriptions = append(descriptions, r.Outbound)
+	if r.UseSniffedDestination {
+		descriptions = append(descriptions, "use-sniffed-destination")
+	}
 	descriptions = append(descriptions, r.Descriptions()...)
 	return F.ToString("route(", strings.Join(descriptions, ","), ")")
 }

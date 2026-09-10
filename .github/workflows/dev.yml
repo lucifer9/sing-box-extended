@@ -1,0 +1,113 @@
+name: Dev CI
+
+on:
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [dev]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dev-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  test-build:
+    name: Tests and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.7'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: service/admin_panel/web/package-lock.json
+      - name: Build admin panel assets
+        working-directory: service/admin_panel/web
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+      - name: Pack admin panel assets
+        run: go run ./cmd/internal/admin_panel_pack -dir service/admin_panel/dist
+      - name: Load release build flags
+        run: |
+          echo "BUILD_TAGS=$(<release/DEFAULT_BUILD_TAGS_OTHERS)" >> "$GITHUB_ENV"
+          echo "LDFLAGS_SHARED=$(<release/LDFLAGS)" >> "$GITHUB_ENV"
+      - name: Test main module
+        run: go test -exec sudo -tags "$BUILD_TAGS" -ldflags "$LDFLAGS_SHARED" -timeout=10m ./...
+      - name: Build CLI
+        run: go build -tags "$BUILD_TAGS" -ldflags "$LDFLAGS_SHARED" -o "$RUNNER_TEMP/sing-box" ./cmd/sing-box
+      - name: Smoke-test CLI
+        run: '"$RUNNER_TEMP/sing-box" version'
+
+  integration:
+    name: Local routing integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.7'
+          cache-dependency-path: |
+            go.sum
+            test/go.sum
+      - name: Prepare standalone integration dependencies
+        # The test module has developer-local sibling replacements. Derive a
+        # temporary modfile from the root replacements without editing either module.
+        run: |
+          modfile="$RUNNER_TEMP/integration.mod"
+          cp test/go.mod "$modfile"
+          cp test/go.sum "$RUNNER_TEMP/integration.sum"
+          go mod edit -modfile="$modfile" -dropreplace=github.com/shtorm-7/rmux
+          go mod edit -json | jq -r '.Replace[] | [.Old.Path, .New.Path, .New.Version] | @tsv' > "$RUNNER_TEMP/root-replacements.tsv"
+          while IFS=$'\t' read -r old new version; do
+            go mod edit -modfile="$modfile" "-replace=$old=$new@$version"
+          done < "$RUNNER_TEMP/root-replacements.tsv"
+          go mod edit -modfile="$modfile" "-replace=github.com/sagernet/sing-box=$GITHUB_WORKSPACE"
+          echo "INTEGRATION_MODFILE=$modfile" >> "$GITHUB_ENV"
+          echo "LDFLAGS_SHARED=$(<release/LDFLAGS)" >> "$GITHUB_ENV"
+      - name: Test local HTTP, SOCKS and routing behavior
+        # Deliberately selected local-listener tests, not the Docker/external-network suite.
+        working-directory: test
+        run: >-
+          go test -modfile="$INTEGRATION_MODFILE" -mod=mod
+          -ldflags "$LDFLAGS_SHARED" -count=1 -timeout=2m
+          -run '^(TestHTTPSelf|TestSOCKSUDPTimeout|TestMixedUDPTimeout|TestRouteUseSniffedDestination.*)$' .
+
+  lint:
+    name: New-code lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.7'
+      - name: Resolve lint baseline
+        id: baseline
+        env:
+          BASE_REVISION: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          base=$(git merge-base "$BASE_REVISION" HEAD)
+          echo "sha=$base" >> "$GITHUB_OUTPUT"
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.13.2
+          args: --timeout=20m --new-from-rev=${{ steps.baseline.outputs.sha }} ./...

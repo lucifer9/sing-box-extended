@@ -394,6 +394,10 @@ func (r *Router) PreMatch(metadata adapter.InboundContext, firstPacket []byte) a
 		case *R.RuleActionRouteOptions:
 			applyRouteOptionsOverride(&metadata, action)
 		case *R.RuleActionRoute:
+			if shouldUseSniffedDestination(&metadata, action) {
+				// IP-only flow forwarding would bypass the outbound's domain handling.
+				return continueResult
+			}
 			applyRouteOptionsOverride(&metadata, &action.RuleActionRouteOptions)
 			return r.preMatchFlow(ctx, &metadata, packetDestination, currentRule, action.Outbound)
 		case *R.RuleActionBypass:
@@ -427,6 +431,10 @@ func (r *Router) PreMatch(metadata adapter.InboundContext, firstPacket []byte) a
 		}
 	}
 	return r.preMatchFlow(ctx, &metadata, packetDestination, nil, "")
+}
+
+func shouldUseSniffedDestination(metadata *adapter.InboundContext, action *R.RuleActionRoute) bool {
+	return action.UseSniffedDestination && metadata.Destination.IsIP() && M.IsDomainName(metadata.SniffedDomain)
 }
 
 func applyRouteOptionsOverride(metadata *adapter.InboundContext, routeOptions *R.RuleActionRouteOptions) {
@@ -690,6 +698,17 @@ match:
 			}
 		}
 		actionType := currentRule.Action().Type()
+		if action, ok := currentRule.Action().(*R.RuleActionRoute); ok &&
+			shouldUseSniffedDestination(metadata, action) {
+			// Keep the client target for UDP response mapping; rules have already matched.
+			if !metadata.RouteOriginalDestination.IsValid() {
+				metadata.RouteOriginalDestination = metadata.Destination
+			}
+			originalDestination := metadata.Destination
+			metadata.Destination = M.Socksaddr{Fqdn: metadata.SniffedDomain, Port: metadata.Destination.Port}
+			metadata.DestinationAddresses = nil
+			r.logger.DebugContext(ctx, "use sniffed destination: ", originalDestination, " => ", metadata.Destination)
+		}
 		if actionType == C.RuleActionTypeRoute ||
 			actionType == C.RuleActionTypeReject ||
 			actionType == C.RuleActionTypeHijackDNS {

@@ -31,6 +31,7 @@ icon: material/new-box
 {
   "action": "route", // default
   "outbound": "",
+  "use_sniffed_destination": false,
  
   ... // route-options Fields
 }
@@ -47,6 +48,41 @@ icon: material/new-box
 ==Required==
 
 Tag of target outbound.
+
+#### use_sniffed_destination
+
+Optional, defaults to `false`. Available only on the terminal `route` action.
+
+After this rule matches, replace an IP destination with the domain obtained by
+[sniffing](#sniff), provided it passes the existing valid-domain check. IP/GeoIP
+rules still see the original destination IP, and domain rules can match the
+sniffed hostname. This option does not enable sniffing; place a `sniff` action
+before the terminal route rule. A DNS reverse mapping alone does not count as
+a sniffed hostname. Applicable pre-match flows defer to normal routing so they
+cannot forward the original IP around this selection.
+
+The destination port is preserved unless `override_port` is set. Previously
+resolved destination address candidates are cleared so the outbound receives
+the domain. The original destination remains in route metadata for UDP response
+NAT and observability; debug logs show the IP-to-domain conversion.
+
+Direct outbounds resolve the domain locally using their configured
+[domain resolver](/configuration/shared/dial/#domain_resolver), address-family
+strategy and fallback behavior. Domain-capable proxy outbounds, such as SOCKS5
+and HTTP, can pass the hostname to the remote proxy for resolution. Other
+outbounds may resolve locally or reject unsupported targets; this option does
+not guarantee remote DNS or access to a particular service.
+
+When disabled, when no valid domain was sniffed, or when the destination is
+already a domain (including normal FakeIP handling), destination selection is
+unchanged. `use_sniffed_destination: true` and a non-empty `override_address`
+are mutually exclusive on the same route action and cause a configuration error.
+An earlier `route-options` action still applies normally; an earlier domain
+address override therefore remains a domain and is not replaced.
+
+This applies only to newly routed connections. It does not migrate established
+connections after a network change or restore the removed inbound
+`sniff_override_destination` field.
 
 #### route-options Fields
 
