@@ -194,8 +194,14 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 			m.logger.ErrorContext(ctx, err)
 			return
 		}
-		remotePacketConn = bufio.NewUnbindPacketConn(remoteConn)
-		connRemoteAddr := M.AddrFromNet(remoteConn.RemoteAddr())
+		remoteDestination := M.SocksaddrFromNet(remoteConn.RemoteAddr())
+		if !remoteDestination.IsValid() && metadata.Destination.IsDomain() {
+			// Some domain-capable proxies expose a net.UDPAddr without an IP.
+			// A connected socket still has the known target needed for response NAT.
+			remoteDestination = metadata.Destination
+		}
+		remotePacketConn = bufio.NewUnbindPacketConnWithAddr(remoteConn, remoteDestination)
+		connRemoteAddr := remoteDestination.Addr
 		if connRemoteAddr != metadata.Destination.Addr {
 			destinationAddress = connRemoteAddr
 		}

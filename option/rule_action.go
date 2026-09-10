@@ -20,7 +20,7 @@ type _RuleAction struct {
 	RouteOptions        RouteActionOptions        `json:"-"`
 	RouteOptionsOptions RouteOptionsActionOptions `json:"-"`
 	DirectOptions       DirectActionOptions       `json:"-"`
-	BypassOptions       RouteActionOptions        `json:"-"`
+	BypassOptions       BypassActionOptions       `json:"-"`
 	RejectOptions       RejectActionOptions       `json:"-"`
 	SniffOptions        RouteActionSniff          `json:"-"`
 	ResolveOptions      RouteActionResolve        `json:"-"`
@@ -65,6 +65,19 @@ func (r *RuleAction) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
+	if r.Action != "" && r.Action != C.RuleActionTypeRoute {
+		// Some action decoders accept unknown fields. This field is route-only,
+		// including when explicitly disabled.
+		var routeOnly struct {
+			UseSniffedDestination json.RawMessage `json:"use_sniffed_destination"`
+		}
+		if err = json.Unmarshal(data, &routeOnly); err != nil {
+			return err
+		}
+		if len(routeOnly.UseSniffedDestination) > 0 {
+			return E.New("`use_sniffed_destination` is only supported on the route action")
+		}
+	}
 	var v any
 	switch r.Action {
 	case "", C.RuleActionTypeRoute:
@@ -94,6 +107,9 @@ func (r *RuleAction) UnmarshalJSON(data []byte) error {
 	err = badjson.UnmarshallExcluded(data, (*_RuleAction)(r), v)
 	if err != nil {
 		return err
+	}
+	if r.Action == C.RuleActionTypeRoute {
+		return r.RouteOptions.Validate()
 	}
 	return nil
 }
@@ -172,6 +188,19 @@ func (r *DNSRuleAction) UnmarshalJSONContext(ctx context.Context, data []byte) e
 }
 
 type RouteActionOptions struct {
+	Outbound              string `json:"outbound,omitempty" reference:"outbound"`
+	UseSniffedDestination bool   `json:"use_sniffed_destination,omitempty"`
+	RawRouteOptionsActionOptions
+}
+
+func (r RouteActionOptions) Validate() error {
+	if r.UseSniffedDestination && r.OverrideAddress != "" {
+		return E.New("`use_sniffed_destination` and `override_address` are mutually exclusive")
+	}
+	return nil
+}
+
+type BypassActionOptions struct {
 	Outbound string `json:"outbound,omitempty" reference:"outbound"`
 	RawRouteOptionsActionOptions
 }
@@ -390,11 +419,19 @@ func rejectProperties(variant *schema.Node) error {
 }
 
 func routeActionUnion(builder schema.Builder) (*schema.Node, error) {
+	routeDestinationConstraint := func(variant *schema.Node) error {
+		staticDestination := schema.LooseObject()
+		staticDestination.Properties.Put("use_sniffed_destination", &schema.Node{Const: false})
+		sniffedDestination := schema.LooseObject()
+		sniffedDestination.Properties.Put("override_address", schema.StringConst(""))
+		variant.AnyOf = []*schema.Node{staticDestination, sniffedDestination}
+		return nil
+	}
 	return actionUnion(builder, []actionVariant{
-		{action: C.RuleActionTypeRoute, actionOptional: true, structType: reflect.TypeFor[RouteActionOptions]()},
+		{action: C.RuleActionTypeRoute, actionOptional: true, structType: reflect.TypeFor[RouteActionOptions](), build: routeDestinationConstraint},
 		{action: C.RuleActionTypeRouteOptions, structType: reflect.TypeFor[RawRouteOptionsActionOptions]()},
 		{action: C.RuleActionTypeDirect, structType: reflect.TypeFor[DirectActionOptions]()},
-		{action: C.RuleActionTypeBypass, structType: reflect.TypeFor[RouteActionOptions]()},
+		{action: C.RuleActionTypeBypass, structType: reflect.TypeFor[BypassActionOptions]()},
 		{action: C.RuleActionTypeReject, build: rejectProperties},
 		{action: C.RuleActionTypeHijackDNS},
 		{action: C.RuleActionTypeSniff, structType: reflect.TypeFor[RouteActionSniff]()},

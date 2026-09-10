@@ -31,6 +31,7 @@ icon: material/new-box
 {
   "action": "route", // 默认
   "outbound": "",
+  "use_sniffed_destination": false,
   
   ... // route-options 字段
 }
@@ -43,6 +44,20 @@ icon: material/new-box
 ==必填==
 
 目标出站的标签。
+
+#### use_sniffed_destination
+
+可选，默认为 `false`，仅适用于终止规则匹配的 `route` 动作。
+
+规则匹配完成后，如果目标是 IP，且[协议嗅探](#sniff)得到的域名通过现有的有效域名检查，则将出站目标替换为该域名。IP/GeoIP 规则仍匹配原始目标 IP，域名规则仍可匹配嗅探得到的主机名。此选项不会自动启用嗅探，需要在终止路由规则之前配置 `sniff` 动作。仅有 DNS 反向映射不算嗅探结果。满足替换条件的预匹配流会进入普通路由流程，避免直接转发原始 IP 而跳过目标选择。
+
+保留目标端口，除非设置了 `override_port`。替换目标时会清空此前解析的目标地址候选，使出站收到域名。路由元数据保留原始目标，用于 UDP 响应 NAT 和连接观测；debug 日志记录 IP 到域名的转换。
+
+直连出站使用其配置的[域名解析器](/zh/configuration/shared/dial/#domain_resolver)、地址族策略和回退机制在本地解析域名。支持域名的代理出站（如 SOCKS5 和 HTTP）可以将主机名交给远端代理解析。其他出站可能在本地解析或拒绝不支持的目标；此选项不保证远端 DNS 解析或特定服务的可用性。
+
+关闭此选项、未嗅探到有效域名，或目标已经是域名（包括正常的 FakeIP 处理）时，目标选择保持不变。同一 `route` 动作中，`use_sniffed_destination: true` 与非空的 `override_address` 互斥，同时设置会导致配置错误。此前的 `route-options` 动作仍正常生效；如果此前已将地址覆盖为域名，该域名不会再次被替换。
+
+此选项仅影响新路由的连接，不会在网络切换后迁移已有连接，也不会恢复已移除的入站 `sniff_override_destination` 字段。
 
 #### route-options 字段
 
