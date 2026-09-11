@@ -25,53 +25,55 @@ import (
 var _ adapter.Router = (*Router)(nil)
 
 type Router struct {
-	ctx               context.Context
-	logger            log.ContextLogger
-	inbound           adapter.InboundManager
-	outbound          adapter.OutboundManager
-	dns               adapter.DNSRouter
-	dnsTransport      adapter.DNSTransportManager
-	connection        adapter.ConnectionManager
-	network           adapter.NetworkManager
-	defaultOutbound   adapter.Outbound
-	httpClientManager adapter.HTTPClientManager
-	rules             []adapter.Rule
-	final             string
-	needFindProcess   bool
-	needFindNeighbor  bool
-	leaseFiles        []string
-	ruleSets          []adapter.RuleSet
-	ruleSetMap        map[string]adapter.RuleSet
-	ruleSetUpdater    *R.RuleSetUpdater
-	processSearcher   process.Searcher
-	processCache      *freelru.Cache[processCacheKey, processCacheEntry]
-	neighborResolver  adapter.NeighborResolver
-	pauseManager      pause.Manager
-	trackers          []adapter.ConnectionTracker
-	platformInterface adapter.PlatformInterface
-	started           chan struct{}
+	ctx                   context.Context
+	logger                log.ContextLogger
+	inbound               adapter.InboundManager
+	outbound              adapter.OutboundManager
+	dns                   adapter.DNSRouter
+	dnsTransport          adapter.DNSTransportManager
+	connection            adapter.ConnectionManager
+	network               adapter.NetworkManager
+	defaultOutbound       adapter.Outbound
+	httpClientManager     adapter.HTTPClientManager
+	rules                 []adapter.Rule
+	final                 string
+	useSniffedDestination bool
+	needFindProcess       bool
+	needFindNeighbor      bool
+	leaseFiles            []string
+	ruleSets              []adapter.RuleSet
+	ruleSetMap            map[string]adapter.RuleSet
+	ruleSetUpdater        *R.RuleSetUpdater
+	processSearcher       process.Searcher
+	processCache          *freelru.Cache[processCacheKey, processCacheEntry]
+	neighborResolver      adapter.NeighborResolver
+	pauseManager          pause.Manager
+	trackers              []adapter.ConnectionTracker
+	platformInterface     adapter.PlatformInterface
+	started               chan struct{}
 }
 
 func NewRouter(ctx context.Context, logFactory log.Factory, name string, options option.RouteOptions, dnsOptions option.DNSOptions) *Router {
 	return &Router{
-		ctx:               ctx,
-		logger:            logFactory.NewLogger(name),
-		inbound:           service.FromContext[adapter.InboundManager](ctx),
-		outbound:          service.FromContext[adapter.OutboundManager](ctx),
-		dns:               service.FromContext[adapter.DNSRouter](ctx),
-		dnsTransport:      service.FromContext[adapter.DNSTransportManager](ctx),
-		connection:        service.FromContext[adapter.ConnectionManager](ctx),
-		network:           service.FromContext[adapter.NetworkManager](ctx),
-		httpClientManager: service.FromContext[adapter.HTTPClientManager](ctx),
-		rules:             make([]adapter.Rule, 0, len(options.Rules)),
-		final:             options.Final,
-		ruleSetMap:        make(map[string]adapter.RuleSet),
-		needFindProcess:   hasRule(options.Rules, isProcessRule) || hasDNSRule(dnsOptions.Rules, isProcessDNSRule) || options.FindProcess,
-		needFindNeighbor:  hasRule(options.Rules, isNeighborRule) || hasDNSRule(dnsOptions.Rules, isNeighborDNSRule) || hasLocalNeighborDNSServer(dnsOptions.Servers) || options.FindNeighbor,
-		leaseFiles:        options.DHCPLeaseFiles,
-		pauseManager:      service.FromContext[pause.Manager](ctx),
-		platformInterface: service.FromContext[adapter.PlatformInterface](ctx),
-		started:           make(chan struct{}),
+		ctx:                   ctx,
+		logger:                logFactory.NewLogger(name),
+		inbound:               service.FromContext[adapter.InboundManager](ctx),
+		outbound:              service.FromContext[adapter.OutboundManager](ctx),
+		dns:                   service.FromContext[adapter.DNSRouter](ctx),
+		dnsTransport:          service.FromContext[adapter.DNSTransportManager](ctx),
+		connection:            service.FromContext[adapter.ConnectionManager](ctx),
+		network:               service.FromContext[adapter.NetworkManager](ctx),
+		httpClientManager:     service.FromContext[adapter.HTTPClientManager](ctx),
+		rules:                 make([]adapter.Rule, 0, len(options.Rules)),
+		final:                 options.Final,
+		useSniffedDestination: options.UseSniffedDestination,
+		ruleSetMap:            make(map[string]adapter.RuleSet),
+		needFindProcess:       hasRule(options.Rules, isProcessRule) || hasDNSRule(dnsOptions.Rules, isProcessDNSRule) || options.FindProcess,
+		needFindNeighbor:      hasRule(options.Rules, isNeighborRule) || hasDNSRule(dnsOptions.Rules, isNeighborDNSRule) || hasLocalNeighborDNSServer(dnsOptions.Servers) || options.FindNeighbor,
+		leaseFiles:            options.DHCPLeaseFiles,
+		pauseManager:          service.FromContext[pause.Manager](ctx),
+		platformInterface:     service.FromContext[adapter.PlatformInterface](ctx),
+		started:               make(chan struct{}),
 	}
 }
 

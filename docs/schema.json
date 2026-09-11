@@ -14205,6 +14205,9 @@
           "type": "string",
           "x-tag-reference": "outbound"
         },
+        "use_sniffed_destination": {
+          "type": "boolean"
+        },
         "find_process": {
           "type": "boolean"
         },

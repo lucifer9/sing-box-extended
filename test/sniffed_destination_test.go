@@ -126,7 +126,7 @@ func TestRouteUseSniffedDestinationConfig(t *testing.T) {
 			DefaultOptions: option.DefaultRule{RuleAction: option.RuleAction{
 				Action: C.RuleActionTypeRoute,
 				RouteOptions: option.RouteActionOptions{
-					Outbound: "direct", UseSniffedDestination: true,
+					Outbound: "direct", UseSniffedDestination: new(true),
 					RawRouteOptionsActionOptions: option.RawRouteOptionsActionOptions{OverrideAddress: "example.org"},
 				},
 			}},
@@ -157,7 +157,7 @@ func TestRouteUseSniffedDestinationHTTP(t *testing.T) {
 					Action: C.RuleActionTypeRoute,
 					RouteOptions: option.RouteActionOptions{
 						Outbound:              "selected",
-						UseSniffedDestination: true,
+						UseSniffedDestination: new(true),
 					},
 				},
 			}},
@@ -187,6 +187,83 @@ func TestRouteUseSniffedDestinationHTTP(t *testing.T) {
 	require.Equal(t, "selected", metadata.RouteOutbound)
 	require.Equal(t, original, metadata.RouteOriginalDestination)
 	require.Empty(t, metadata.DestinationAddresses)
+}
+
+type sniffedDestinationPolicy struct {
+	name     string
+	route    string
+	enabled  bool
+	outbound string
+}
+
+func sniffedDestinationPolicies() []sniffedDestinationPolicy {
+	var policies []sniffedDestinationPolicy
+	for _, global := range []bool{false, true} {
+		for _, policy := range []struct {
+			name     string
+			rule     string
+			final    string
+			enabled  bool
+			outbound string
+		}{
+			{"inherit", `{"ip_cidr":"2001:db8::/32","outbound":"selected"}`, "", global, "selected"},
+			{"enable", `{"ip_cidr":"2001:db8::/32","outbound":"selected","use_sniffed_destination":true}`, "", true, "selected"},
+			{"disable", `{"ip_cidr":"2001:db8::/32","outbound":"selected","use_sniffed_destination":false}`, "", false, "selected"},
+			{"final", `{"domain":"unmatched.example.org","action":"reject"}`, "selected", global, "selected"},
+			{"default-outbound", `{"domain":"unmatched.example.org","action":"reject"}`, "", global, "fallback"},
+		} {
+			policies = append(policies, sniffedDestinationPolicy{
+				name:     fmt.Sprintf("global=%v/%s", global, policy.name),
+				route:    fmt.Sprintf(`{"use_sniffed_destination":%v,"rules":[{"action":"sniff"},%s],"final":%q}`, global, policy.rule, policy.final),
+				enabled:  policy.enabled,
+				outbound: policy.outbound,
+			})
+		}
+	}
+	return policies
+}
+
+func TestRouteUseSniffedDestinationPolicyTCP(t *testing.T) {
+	for _, policy := range sniffedDestinationPolicies() {
+		t.Run(policy.name, func(t *testing.T) {
+			proxy, requests := sniffedHTTPProxy(t)
+			fallback := proxy
+			fallback.Tag = "fallback"
+			var routeOptions option.RouteOptions
+			require.NoError(t, json.UnmarshalContextDisallowUnknownFields(globalCtx, []byte(policy.route), &routeOptions))
+			instance := startInstance(t, option.Options{Outbounds: []option.Outbound{fallback, proxy}, Route: &routeOptions})
+			tracker := &sniffedRouteTracker{metadata: make(chan adapter.InboundContext, 1)}
+			instance.Router().AppendTracker(tracker)
+			client, inbound := net.Pipe()
+			t.Cleanup(func() { client.Close() })
+			require.NoError(t, client.SetDeadline(time.Now().Add(5*time.Second)))
+			original := M.ParseSocksaddr("[2001:db8::1]:8443")
+			candidates := []netip.Addr{netip.MustParseAddr("192.0.2.20")}
+			go instance.Router().RouteConnectionEx(t.Context(), inbound, adapter.InboundContext{
+				Destination: original, DestinationAddresses: candidates,
+			}, nil)
+			payload := "GET / HTTP/1.1\r\nHost: cdn.example.org\r\n\r\n"
+			_, err := io.WriteString(client, payload)
+			require.NoError(t, err)
+			response := make([]byte, len(payload))
+			_, err = io.ReadFull(client, response)
+			require.NoError(t, err)
+			require.Equal(t, payload, string(response))
+			request := <-requests
+			require.NoError(t, request.err)
+			metadata := <-tracker.metadata
+			require.Equal(t, policy.outbound, metadata.RouteOutbound)
+			if policy.enabled {
+				require.Equal(t, "cdn.example.org:8443", request.target)
+				require.Equal(t, original, metadata.RouteOriginalDestination)
+				require.Empty(t, metadata.DestinationAddresses)
+			} else {
+				require.Equal(t, "192.0.2.20:8443", request.target)
+				require.False(t, metadata.RouteOriginalDestination.IsValid())
+				require.Equal(t, candidates, metadata.DestinationAddresses)
+			}
+		})
+	}
 }
 
 func TestRouteUseSniffedDestinationTLS(t *testing.T) {
@@ -255,11 +332,13 @@ func TestRouteUseSniffedDestinationDirect(t *testing.T) {
 		ipv4        bool
 		ipv6        bool
 		wantNetwork string
+		final       bool
 	}{
-		{"ipv4-only-fallback", C.DomainStrategyPreferIPv6, true, false, "tcp4"},
-		{"ipv6-only-fallback", C.DomainStrategyPreferIPv4, false, true, "tcp6"},
-		{"dual-stack-prefer-ipv4", C.DomainStrategyPreferIPv4, true, true, "tcp4"},
-		{"dual-stack-prefer-ipv6", C.DomainStrategyPreferIPv6, true, true, "tcp6"},
+		{"ipv4-only-fallback", C.DomainStrategyPreferIPv6, true, false, "tcp4", false},
+		{"ipv6-only-fallback", C.DomainStrategyPreferIPv4, false, true, "tcp6", false},
+		{"dual-stack-prefer-ipv4", C.DomainStrategyPreferIPv4, true, true, "tcp4", false},
+		{"dual-stack-prefer-ipv6", C.DomainStrategyPreferIPv6, true, true, "tcp6", false},
+		{"final-ipv4-fallback", C.DomainStrategyPreferIPv6, true, false, "tcp4", true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var port uint16
@@ -280,9 +359,12 @@ func TestRouteUseSniffedDestinationDirect(t *testing.T) {
 			var rules []option.Rule
 			require.NoError(t, json.Unmarshal([]byte(`[
 				{"action":"sniff"},
-				{"ip_cidr":"2001:db8::/32","outbound":"selected","use_sniffed_destination":true},
+				{"ip_cidr":"2001:db8::/32","outbound":"selected"},
 				{"action":"reject"}
 			]`), &rules))
+			if test.final {
+				rules = rules[:1]
+			}
 			instance := startInstance(t, option.Options{
 				DNS: &option.DNSOptions{RawDNSOptions: option.RawDNSOptions{
 					Servers: []option.DNSServerOptions{{Type: C.DNSTypeHosts, Tag: "controlled", Options: &option.HostsDNSServerOptions{Predefined: predefined}}},
@@ -293,7 +375,7 @@ func TestRouteUseSniffedDestinationDirect(t *testing.T) {
 						FallbackDelay:  badoption.Duration(10 * time.Millisecond),
 					}},
 				}}},
-				Route: &option.RouteOptions{Rules: rules},
+				Route: &option.RouteOptions{Rules: rules, Final: "selected", UseSniffedDestination: true},
 			})
 			tracker := &sniffedRouteTracker{metadata: make(chan adapter.InboundContext, 1)}
 			instance.Router().AppendTracker(tracker)
@@ -423,43 +505,55 @@ func (c *sniffedInboundPacketConn) WritePacket(buffer *buf.Buffer, destination M
 }
 
 func TestRouteUseSniffedDestinationUDP(t *testing.T) {
-	for _, connected := range []bool{false, true} {
-		t.Run(fmt.Sprintf("udp-connect=%v", connected), func(t *testing.T) {
-			proxy, requests := sniffedSOCKSProxy(t)
-			var rules []option.Rule
-			require.NoError(t, json.Unmarshal([]byte(fmt.Sprintf(`[
-				{"ip_cidr":"2001:db8::/32","outbound":"selected","use_sniffed_destination":true,"udp_connect":%v},
-				{"action":"reject"}
-			]`, connected)), &rules))
-			instance := startInstance(t, option.Options{Outbounds: []option.Outbound{proxy}, Route: &option.RouteOptions{Rules: rules}})
-			tracker := &sniffedRouteTracker{metadata: make(chan adapter.InboundContext, 1)}
-			instance.Router().AppendTracker(tracker)
-			client, pipe := net.Pipe()
-			t.Cleanup(func() { client.Close() })
-			require.NoError(t, client.SetDeadline(time.Now().Add(5*time.Second)))
-			original := M.ParseSocksaddr("[2001:db8::1]:8443")
-			inbound := &sniffedInboundPacketConn{Conn: pipe, destination: original, responses: make(chan sniffedPacket, 1)}
-			go instance.Router().RoutePacketConnectionEx(t.Context(), inbound, adapter.InboundContext{
-				InboundType: C.TypeTun, Destination: original, Domain: "cdn.example.org", SniffedDomain: "cdn.example.org", Protocol: C.ProtocolQUIC,
-				DestinationAddresses: []netip.Addr{netip.MustParseAddr("192.0.2.20")},
-			}, nil)
-			_, err := io.WriteString(client, "ping")
-			require.NoError(t, err)
-			select {
-			case response := <-inbound.responses:
-				require.Equal(t, "ping", string(response.payload))
-				require.Equal(t, original, response.destination)
-			case <-time.After(5 * time.Second):
-				t.Fatal("no UDP response mapped to the original client destination")
-			}
-			request := <-requests
-			require.NoError(t, request.err)
-			require.Equal(t, "cdn.example.org:8443", request.target)
-			metadata := <-tracker.metadata
-			require.Equal(t, "selected", metadata.RouteOutbound)
-			require.Equal(t, original, metadata.RouteOriginalDestination)
-			require.Empty(t, metadata.DestinationAddresses)
-		})
+	for _, policy := range sniffedDestinationPolicies() {
+		for _, connected := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/udp-connect=%v", policy.name, connected), func(t *testing.T) {
+				proxy, requests := sniffedSOCKSProxy(t)
+				fallback := proxy
+				fallback.Tag = "fallback"
+				var routeOptions option.RouteOptions
+				require.NoError(t, json.UnmarshalContext(globalCtx, []byte(policy.route), &routeOptions))
+				if connected {
+					var udpOptions option.Rule
+					require.NoError(t, json.Unmarshal([]byte(`{"action":"route-options","udp_connect":true}`), &udpOptions))
+					routeOptions.Rules = append([]option.Rule{udpOptions}, routeOptions.Rules...)
+				}
+				instance := startInstance(t, option.Options{Outbounds: []option.Outbound{fallback, proxy}, Route: &routeOptions})
+				tracker := &sniffedRouteTracker{metadata: make(chan adapter.InboundContext, 1)}
+				instance.Router().AppendTracker(tracker)
+				client, pipe := net.Pipe()
+				t.Cleanup(func() { client.Close() })
+				require.NoError(t, client.SetDeadline(time.Now().Add(5*time.Second)))
+				original := M.ParseSocksaddr("[2001:db8::1]:8443")
+				inbound := &sniffedInboundPacketConn{Conn: pipe, destination: original, responses: make(chan sniffedPacket, 1)}
+				go instance.Router().RoutePacketConnectionEx(t.Context(), inbound, adapter.InboundContext{
+					InboundType: C.TypeTun, Destination: original, Domain: "cdn.example.org", SniffedDomain: "cdn.example.org", Protocol: C.ProtocolQUIC,
+					DestinationAddresses: []netip.Addr{netip.MustParseAddr("192.0.2.20")},
+				}, nil)
+				_, err := io.WriteString(client, "ping")
+				require.NoError(t, err)
+				select {
+				case response := <-inbound.responses:
+					require.Equal(t, "ping", string(response.payload))
+					require.Equal(t, original, response.destination)
+				case <-time.After(5 * time.Second):
+					t.Fatal("no UDP response mapped to the original client destination")
+				}
+				request := <-requests
+				require.NoError(t, request.err)
+				metadata := <-tracker.metadata
+				require.Equal(t, policy.outbound, metadata.RouteOutbound)
+				if policy.enabled {
+					require.Equal(t, "cdn.example.org:8443", request.target)
+					require.Equal(t, original, metadata.RouteOriginalDestination)
+					require.Empty(t, metadata.DestinationAddresses)
+				} else {
+					require.Equal(t, "192.0.2.20:8443", request.target)
+					require.False(t, metadata.RouteOriginalDestination.IsValid())
+					require.Equal(t, []netip.Addr{netip.MustParseAddr("192.0.2.20")}, metadata.DestinationAddresses)
+				}
+			})
+		}
 	}
 }
 
@@ -489,7 +583,7 @@ func TestRouteUseSniffedDestinationReverseMapping(t *testing.T) {
 			var options option.Options
 			require.NoError(t, json.UnmarshalContext(globalCtx, []byte(`{
 				"dns":{"reverse_mapping":true,"servers":[{"type":"hosts","tag":"controlled","predefined":{"cached.example.org":"2001:db8::1"}}]},
-				"route":{"rules":[{"ip_cidr":"2001:db8::/32","outbound":"selected","use_sniffed_destination":true},{"action":"reject"}]}
+				"route":{"use_sniffed_destination":true,"final":"selected"}
 			}`), &options))
 			options.Outbounds = []option.Outbound{proxy}
 			if test.sniff {
@@ -591,31 +685,40 @@ func (o *sniffedFlowOutbound) ListenPacket(_ context.Context, target M.Socksaddr
 	return nil, fmt.Errorf("domain targets unsupported: %s", target)
 }
 
+func sniffedFlowRouter(t *testing.T, route string) (adapter.Router, map[string]*sniffedFlowOutbound) {
+	t.Helper()
+	ctx := include.Context(t.Context())
+	registry := service.FromContext[adapter.OutboundRegistry](ctx).(*outbound.Registry)
+	controlled := make(map[string]*sniffedFlowOutbound)
+	outbound.Register[struct{}](registry, "test-flow", func(_ context.Context, _ adapter.Router, _ log.ContextLogger, tag string, _ struct{}) (adapter.Outbound, error) {
+		flow := &sniffedFlowOutbound{Adapter: outbound.NewAdapter("test-flow", tag, []string{N.NetworkTCP, N.NetworkUDP}, nil), targets: make(chan M.Socksaddr, 1)}
+		controlled[tag] = flow
+		return flow, nil
+	})
+	var options option.Options
+	require.NoError(t, json.UnmarshalContext(ctx, []byte(fmt.Sprintf(`{
+		"outbounds":[{"type":"test-flow","tag":"fallback"},{"type":"test-flow","tag":"selected"}],
+		"route":%s
+	}`, route)), &options))
+	options.Log = &option.LogOptions{Level: "warning"}
+	instance, err := box.New(box.Options{Context: ctx, Options: options})
+	require.NoError(t, err)
+	t.Cleanup(func() { instance.Close() })
+	require.NoError(t, instance.Start())
+	return instance.Router(), controlled
+}
+
 func TestRouteUseSniffedDestinationPreMatch(t *testing.T) {
 	packet := sniffedQUICInitial(t)
-	for _, enabled := range []bool{false, true} {
-		t.Run(fmt.Sprintf("enabled=%v", enabled), func(t *testing.T) {
-			ctx := include.Context(t.Context())
-			registry := service.FromContext[adapter.OutboundRegistry](ctx).(*outbound.Registry)
-			controlled := &sniffedFlowOutbound{Adapter: outbound.NewAdapter("test-flow", "selected", []string{N.NetworkTCP, N.NetworkUDP}, nil), targets: make(chan M.Socksaddr, 1)}
-			outbound.Register[struct{}](registry, "test-flow", func(context.Context, adapter.Router, log.ContextLogger, string, struct{}) (adapter.Outbound, error) {
-				return controlled, nil
-			})
-			var options option.Options
-			require.NoError(t, json.UnmarshalContext(ctx, []byte(fmt.Sprintf(`{
-				"outbounds":[{"type":"test-flow","tag":"selected"}],
-				"route":{"rules":[{"action":"sniff","sniffer":"quic"},{"ip_cidr":"2001:db8::/32","outbound":"selected","use_sniffed_destination":%v},{"action":"reject"}]}
-			}`, enabled)), &options))
-			options.Log = &option.LogOptions{Level: "warning"}
-			instance, err := box.New(box.Options{Context: ctx, Options: options})
-			require.NoError(t, err)
-			t.Cleanup(func() { instance.Close() })
-			require.NoError(t, instance.Start())
+	for _, policy := range sniffedDestinationPolicies() {
+		t.Run(policy.name, func(t *testing.T) {
+			router, controlled := sniffedFlowRouter(t, policy.route)
 			original := M.ParseSocksaddr("[2001:db8::1]:8443")
 			metadata := adapter.InboundContext{InboundType: C.TypeTun, Network: N.NetworkUDP, Destination: original}
-			result := instance.Router().PreMatch(metadata, packet)
-			if !enabled {
+			result := router.PreMatch(metadata, packet)
+			if !policy.enabled {
 				require.Equal(t, adapter.PreMatchFlow, result.Action)
+				require.Equal(t, policy.outbound, result.Outbound.Tag())
 				return
 			}
 			require.Equal(t, adapter.PreMatchContinue, result.Action)
@@ -624,8 +727,8 @@ func TestRouteUseSniffedDestinationPreMatch(t *testing.T) {
 			require.NoError(t, client.SetDeadline(time.Now().Add(5*time.Second)))
 			inbound := &sniffedInboundPacketConn{Conn: pipe, destination: original, responses: make(chan sniffedPacket, 1)}
 			closed := make(chan error, 1)
-			go instance.Router().RoutePacketConnectionEx(t.Context(), inbound, metadata, func(err error) { closed <- err })
-			_, err = client.Write(packet)
+			go router.RoutePacketConnectionEx(t.Context(), inbound, metadata, func(err error) { closed <- err })
+			_, err := client.Write(packet)
 			require.NoError(t, err)
 			select {
 			case err := <-closed:
@@ -633,7 +736,45 @@ func TestRouteUseSniffedDestinationPreMatch(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("domain capability error was not reported")
 			}
-			require.Equal(t, "cdn.example.org:8443", (<-controlled.targets).String())
+			select {
+			case target := <-controlled[policy.outbound].targets:
+				require.Equal(t, "cdn.example.org:8443", target.String())
+			case <-time.After(5 * time.Second):
+				t.Fatal("the configured outbound did not receive the domain target")
+			}
+		})
+	}
+}
+
+func TestRouteUseSniffedDestinationPreMatchCompatibility(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		action      string
+		domain      string
+		wantAction  adapter.PreMatchAction
+		wantAddress netip.AddrPort
+	}{
+		{name: "final-no-sniff", wantAction: adapter.PreMatchFlow},
+		{name: "final-invalid-domain", domain: "bad..example.org", wantAction: adapter.PreMatchFlow},
+		{name: "final-valid-domain", domain: "cdn.example.org", wantAction: adapter.PreMatchContinue},
+		{name: "static-ip", action: `{"outbound":"selected","override_address":"192.0.2.5"}`, domain: "cdn.example.org", wantAction: adapter.PreMatchFlow, wantAddress: netip.MustParseAddrPort("192.0.2.5:8443")},
+		{name: "bypass-outbound", action: `{"action":"bypass","outbound":"selected"}`, domain: "cdn.example.org", wantAction: adapter.PreMatchFlow},
+		{name: "bypass", action: `{"action":"bypass"}`, domain: "cdn.example.org", wantAction: adapter.PreMatchBypass},
+		{name: "reject", action: `{"action":"reject"}`, domain: "cdn.example.org", wantAction: adapter.PreMatchReject},
+		{name: "drop", action: `{"action":"reject","method":"drop"}`, domain: "cdn.example.org", wantAction: adapter.PreMatchDrop},
+		{name: "hijack-dns", action: `{"action":"hijack-dns"}`, domain: "cdn.example.org", wantAction: adapter.PreMatchHijackDNS},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			router, _ := sniffedFlowRouter(t, fmt.Sprintf(`{"use_sniffed_destination":true,"final":"selected","rules":[%s]}`, test.action))
+			result := router.PreMatch(adapter.InboundContext{
+				InboundType: C.TypeTun, Network: N.NetworkUDP, Destination: M.ParseSocksaddr("[2001:db8::1]:8443"),
+				Domain: "cached.example.org", SniffedDomain: test.domain,
+			}, nil)
+			require.Equal(t, test.wantAction, result.Action)
+			require.Equal(t, test.wantAddress, result.Destination)
+			if test.wantAction == adapter.PreMatchFlow {
+				require.Equal(t, "selected", result.Outbound.Tag())
+			}
 		})
 	}
 }
@@ -642,10 +783,8 @@ func TestRouteUseSniffedDestinationFakeIP(t *testing.T) {
 	proxy, requests := sniffedSOCKSProxy(t)
 	var dnsOptions option.DNSOptions
 	require.NoError(t, json.UnmarshalContext(globalCtx, []byte(`{"servers":[{"type":"hosts","tag":"hosts"},{"type":"fakeip","tag":"fake","inet4_range":"198.18.0.0/15"}],"rules":[{"query_type":"A","server":"fake"}]}`), &dnsOptions))
-	var rule option.Rule
-	require.NoError(t, json.Unmarshal([]byte(`{"outbound":"selected","use_sniffed_destination":true}`), &rule))
 	instance := startInstance(t, option.Options{
-		DNS: &dnsOptions, Outbounds: []option.Outbound{proxy}, Route: &option.RouteOptions{Rules: []option.Rule{rule}},
+		DNS: &dnsOptions, Outbounds: []option.Outbound{proxy}, Route: &option.RouteOptions{Final: "selected", UseSniffedDestination: true},
 	})
 	tracker := &sniffedRouteTracker{metadata: make(chan adapter.InboundContext, 1)}
 	instance.Router().AppendTracker(tracker)
@@ -752,6 +891,8 @@ func TestRouteUseSniffedDestinationCompatibility(t *testing.T) {
 		wantTarget    string
 		wantOrigin    string
 		wantCandidate bool
+		global        bool
+		final         bool
 	}{
 		{name: "default", action: `{"outbound":"selected"}`, domain: "cdn.example.org", wantTarget: "[2001:db8::1]:8443"},
 		{name: "disabled", action: `{"outbound":"selected","use_sniffed_destination":false}`, domain: "cdn.example.org", candidate: true, wantTarget: "192.0.2.20:8443", wantCandidate: true},
@@ -768,15 +909,32 @@ func TestRouteUseSniffedDestinationCompatibility(t *testing.T) {
 		{name: "earlier-domain-override", priorRule: `{"action":"route-options","override_address":"static.example.org"}`, domain: "cdn.example.org", candidate: true, wantTarget: "static.example.org:8443", wantOrigin: "[2001:db8::1]:8443"},
 		{name: "earlier-port-override", priorRule: `{"action":"route-options","override_port":9443}`, domain: "cdn.example.org", wantTarget: "cdn.example.org:9443", wantOrigin: "[2001:db8::1]:8443"},
 		{name: "preserve-origin", domain: "cdn.example.org", origin: "192.0.2.30:443", wantTarget: "cdn.example.org:8443", wantOrigin: "192.0.2.30:443"},
+		{name: "global-static-ip", global: true, action: `{"outbound":"selected","override_address":"192.0.2.5"}`, domain: "cdn.example.org", candidate: true, wantTarget: "192.0.2.5:8443", wantOrigin: "[2001:db8::1]:8443"},
+		{name: "global-static-domain", global: true, action: `{"outbound":"selected","override_address":"static.example.org"}`, domain: "cdn.example.org", candidate: true, wantTarget: "static.example.org:8443", wantOrigin: "[2001:db8::1]:8443"},
+		{name: "global-disabled-static", global: true, action: `{"outbound":"selected","use_sniffed_destination":false,"override_address":"192.0.2.5"}`, domain: "cdn.example.org", wantTarget: "192.0.2.5:8443", wantOrigin: "[2001:db8::1]:8443"},
+		{name: "global-override-port", global: true, action: `{"outbound":"selected","override_port":9443}`, domain: "cdn.example.org", wantTarget: "cdn.example.org:9443", wantOrigin: "[2001:db8::1]:8443"},
+		{name: "global-missing-domain", global: true, action: `{"outbound":"selected"}`, wantTarget: "[2001:db8::1]:8443"},
+		{name: "global-invalid-domain", global: true, action: `{"outbound":"selected"}`, domain: "bad..example.org", candidate: true, wantTarget: "192.0.2.20:8443", wantCandidate: true},
+		{name: "global-already-domain", global: true, action: `{"outbound":"selected"}`, destination: "original.example.org:8443", domain: "cdn.example.org", wantTarget: "original.example.org:8443"},
+		{name: "final-missing-domain", global: true, final: true, wantTarget: "[2001:db8::1]:8443"},
+		{name: "final-invalid-domain", global: true, final: true, domain: "bad..example.org", candidate: true, wantTarget: "192.0.2.20:8443", wantCandidate: true},
+		{name: "final-already-domain", global: true, final: true, destination: "original.example.org:8443", domain: "cdn.example.org", wantTarget: "original.example.org:8443"},
+		{name: "final-earlier-domain-override", global: true, final: true, priorRule: `{"action":"route-options","override_address":"static.example.org"}`, domain: "cdn.example.org", candidate: true, wantTarget: "static.example.org:8443", wantOrigin: "[2001:db8::1]:8443"},
+		{name: "final-earlier-ip-override", global: true, final: true, priorRule: `{"action":"route-options","override_address":"192.0.2.5"}`, domain: "cdn.example.org", wantTarget: "cdn.example.org:8443", wantOrigin: "[2001:db8::1]:8443"},
+		{name: "final-earlier-port-override", global: true, final: true, priorRule: `{"action":"route-options","override_port":9443}`, domain: "cdn.example.org", wantTarget: "cdn.example.org:9443", wantOrigin: "[2001:db8::1]:8443"},
+		{name: "global-bypass", global: true, action: `{"action":"bypass","outbound":"selected"}`, domain: "cdn.example.org", candidate: true, wantTarget: "192.0.2.20:8443", wantCandidate: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			proxy, requests := sniffedHTTPProxy(t)
 			if test.action == "" {
 				test.action = `{"outbound":"selected","use_sniffed_destination":true}`
 			}
-			var rule option.Rule
-			require.NoError(t, json.Unmarshal([]byte(test.action), &rule))
-			rules := []option.Rule{rule}
+			var rules []option.Rule
+			if !test.final {
+				var rule option.Rule
+				require.NoError(t, json.Unmarshal([]byte(test.action), &rule))
+				rules = []option.Rule{rule}
+			}
 			if test.priorRule != "" {
 				var prior option.Rule
 				require.NoError(t, json.Unmarshal([]byte(test.priorRule), &prior))
@@ -784,7 +942,7 @@ func TestRouteUseSniffedDestinationCompatibility(t *testing.T) {
 			}
 			instance := startInstance(t, option.Options{
 				Outbounds: []option.Outbound{proxy},
-				Route:     &option.RouteOptions{Rules: rules},
+				Route:     &option.RouteOptions{Rules: rules, Final: "selected", UseSniffedDestination: test.global},
 			})
 			tracker := &sniffedRouteTracker{metadata: make(chan adapter.InboundContext, 1)}
 			instance.Router().AppendTracker(tracker)

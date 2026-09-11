@@ -199,7 +199,7 @@ func NewDNSRuleAction(logger logger.ContextLogger, action option.DNSRuleAction) 
 
 type RuleActionRoute struct {
 	Outbound              string
-	UseSniffedDestination bool
+	UseSniffedDestination *bool
 	RuleActionRouteOptions
 }
 
@@ -210,8 +210,8 @@ func (r *RuleActionRoute) Type() string {
 func (r *RuleActionRoute) String() string {
 	var descriptions []string
 	descriptions = append(descriptions, r.Outbound)
-	if r.UseSniffedDestination {
-		descriptions = append(descriptions, "use-sniffed-destination")
+	if r.UseSniffedDestination != nil {
+		descriptions = append(descriptions, F.ToString("use-sniffed-destination=", *r.UseSniffedDestination))
 	}
 	descriptions = append(descriptions, r.Descriptions()...)
 	return F.ToString("route(", strings.Join(descriptions, ","), ")")

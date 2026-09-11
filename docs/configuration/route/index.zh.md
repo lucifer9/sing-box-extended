@@ -39,6 +39,7 @@ icon: material/alert-decagram
     "rules": [],
     "rule_set": [],
     "final": "",
+    "use_sniffed_destination": false,
     "auto_detect_interface": false,
     "override_android_vpn": false,
     "default_interface": "",
@@ -77,6 +78,33 @@ icon: material/alert-decagram
 #### final
 
 默认出站标签。如果为空，将使用第一个可用于对应协议的出站。
+
+#### use_sniffed_destination
+
+可选，默认为 `false`。设置终止 `route` 动作的[嗅探目标选择](./rule_action.md#use_sniffed_destination)默认值，并应用于未命中终止规则时的 `final` 兜底。未配置 `final` 时，同样应用于默认出站。
+
+单条 `route` 规则未填写此字段时继承全局设置；显式 `true` 或 `false` 覆盖全局设置。同条规则中的 `override_address` 优先于全局继承；显式 `true` 与非空 `override_address` 仍互斥。此设置不影响 `reject`、`hijack-dns`、`bypass` 等其他动作。
+
+此开关不会自动启用嗅探，仍需在终止路由规则之前配置 `sniff`。匹配结束后，仅当目标是 IP 且嗅探得到有效域名时才替换目标；没有有效嗅探结果或目标已是域名时保持不变。
+
+以下配置让兜底流量使用嗅探域名，同时为一条直连规则保留原目标：
+
+```json
+{
+  "route": {
+    "use_sniffed_destination": true,
+    "rules": [
+      { "action": "sniff" },
+      {
+        "domain_suffix": ["example.cn"],
+        "outbound": "direct",
+        "use_sniffed_destination": false
+      }
+    ],
+    "final": "proxy"
+  }
+}
+```
 
 #### auto_detect_interface
 
