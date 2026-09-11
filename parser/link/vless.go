@@ -92,30 +92,31 @@ func parseVLESSLink(link string) (option.Outbound, error) {
 								Transport.XHTTPOptions.Xmux = &option.V2RayXHTTPXmuxOptions{}
 								if val, ok := xmux["cMaxReuseTimes"].(string); ok {
 									if r, err := common.ParseXHTTPRange(val); err == nil {
-										Transport.XHTTPOptions.Xmux.CMaxReuseTimes = r
+										Transport.XHTTPOptions.Xmux.CMaxReuseTimes = &r
 									}
 								}
 								if val, ok := xmux["maxConcurrency"].(string); ok {
 									if r, err := common.ParseXHTTPRange(val); err == nil {
-										Transport.XHTTPOptions.Xmux.MaxConcurrency = r
+										Transport.XHTTPOptions.Xmux.MaxConcurrency = &r
 									}
 								}
 								if val, ok := xmux["maxConnections"].(string); ok {
 									if r, err := common.ParseXHTTPRange(val); err == nil {
-										Transport.XHTTPOptions.Xmux.MaxConnections = r
+										Transport.XHTTPOptions.Xmux.MaxConnections = &r
 									}
 								}
 								if val, ok := xmux["hKeepAlivePeriod"].(string); ok {
-									Transport.XHTTPOptions.Xmux.HKeepAlivePeriod = common.StringToType[int64](val)
+									period := common.StringToType[int64](val)
+									Transport.XHTTPOptions.Xmux.HKeepAlivePeriod = &period
 								}
 								if val, ok := xmux["hMaxRequestTimes"].(string); ok {
 									if r, err := common.ParseXHTTPRange(val); err == nil {
-										Transport.XHTTPOptions.Xmux.HMaxRequestTimes = r
+										Transport.XHTTPOptions.Xmux.HMaxRequestTimes = &r
 									}
 								}
 								if val, ok := xmux["hMaxReusableSecs"].(string); ok {
 									if r, err := common.ParseXHTTPRange(val); err == nil {
-										Transport.XHTTPOptions.Xmux.HMaxReusableSecs = r
+										Transport.XHTTPOptions.Xmux.HMaxReusableSecs = &r
 									}
 								}
 							}
@@ -124,7 +125,7 @@ func parseVLESSLink(link string) (option.Outbound, error) {
 							}
 							if val, ok := extraOptions["xPaddingBytes"].(string); ok {
 								if r, err := common.ParseXHTTPRange(val); err == nil {
-									Transport.XHTTPOptions.XPaddingBytes = r
+									Transport.XHTTPOptions.XPaddingBytes = &r
 								}
 							}
 							if val, ok := extraOptions["scMaxEachPostBytes"].(string); ok {
