@@ -57,6 +57,10 @@ type Server struct {
 }
 
 func NewServer(ctx context.Context, logger logger.ContextLogger, options option.V2RayXHTTPOptions, tlsConfig tls.ServerConfig, handler adapter.V2RayServerTransportHandler) (*Server, error) {
+	options, err := options.Normalize()
+	if err != nil {
+		return nil, err
+	}
 	server := &Server{
 		ctx:       ctx,
 		logger:    logger,
