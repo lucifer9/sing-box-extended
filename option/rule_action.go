@@ -189,12 +189,12 @@ func (r *DNSRuleAction) UnmarshalJSONContext(ctx context.Context, data []byte) e
 
 type RouteActionOptions struct {
 	Outbound              string `json:"outbound,omitempty" reference:"outbound"`
-	UseSniffedDestination bool   `json:"use_sniffed_destination,omitempty"`
+	UseSniffedDestination *bool  `json:"use_sniffed_destination,omitempty"`
 	RawRouteOptionsActionOptions
 }
 
 func (r RouteActionOptions) Validate() error {
-	if r.UseSniffedDestination && r.OverrideAddress != "" {
+	if r.UseSniffedDestination != nil && *r.UseSniffedDestination && r.OverrideAddress != "" {
 		return E.New("`use_sniffed_destination` and `override_address` are mutually exclusive")
 	}
 	return nil

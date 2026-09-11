@@ -6,6 +6,7 @@ import (
 
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing/common/json"
+	"github.com/sagernet/sing/common/json/badjson"
 
 	"github.com/stretchr/testify/require"
 )
@@ -20,6 +21,32 @@ func TestRouteActionUseSniffedDestination(t *testing.T) {
 		encoded, err := json.Marshal(action)
 		require.NoError(t, err)
 		require.JSONEq(t, `{"outbound":"proxy","use_sniffed_destination":true}`, string(encoded))
+	}
+}
+
+func TestRouteUseSniffedDestinationFormat(t *testing.T) {
+	for _, global := range []string{"", `"use_sniffed_destination":false,`, `"use_sniffed_destination":true,`} {
+		t.Run(global, func(t *testing.T) {
+			rules := `"rules":[
+				{"domain":"inherit.example.org","outbound":"proxy"},
+				{"domain":"disabled.example.org","outbound":"proxy","use_sniffed_destination":false},
+				{"type":"logical","mode":"and","rules":[{"domain":"enabled.example.org"}],"outbound":"proxy","use_sniffed_destination":true}
+			]`
+			var options Options
+			require.NoError(t, json.UnmarshalContext(context.Background(), []byte(`{"route":{`+global+rules+`}}`), &options))
+			expectedGlobal := global
+			if global == `"use_sniffed_destination":false,` {
+				expectedGlobal = ""
+			}
+			for range 2 {
+				formatted, err := badjson.Omitempty(context.Background(), options)
+				require.NoError(t, err)
+				encoded, err := json.MarshalContext(context.Background(), formatted)
+				require.NoError(t, err)
+				require.JSONEq(t, `{"route":{`+expectedGlobal+rules+`}}`, string(encoded))
+				options = formatted
+			}
+		})
 	}
 }
 

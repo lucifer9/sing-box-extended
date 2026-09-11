@@ -31,7 +31,7 @@ icon: material/new-box
 {
   "action": "route", // default
   "outbound": "",
-  "use_sniffed_destination": false,
+  "use_sniffed_destination": false, // optional; omitted means inherit the route-level setting
  
   ... // route-options Fields
 }
@@ -51,7 +51,10 @@ Tag of target outbound.
 
 #### use_sniffed_destination
 
-Optional, defaults to `false`. Available only on the terminal `route` action.
+Optional. Available only on the terminal `route` action. When omitted, inherits
+[route.use_sniffed_destination](./index.md#use_sniffed_destination), whose global
+default is `false`. Explicit `true` enables replacement for this rule; explicit
+`false` disables it. Both override the global setting.
 
 After this rule matches, replace an IP destination with the domain obtained by
 [sniffing](#sniff), provided it passes the existing valid-domain check. IP/GeoIP
@@ -73,12 +76,17 @@ and HTTP, can pass the hostname to the remote proxy for resolution. Other
 outbounds may resolve locally or reject unsupported targets; this option does
 not guarantee remote DNS or access to a particular service.
 
-When disabled, when no valid domain was sniffed, or when the destination is
-already a domain (including normal FakeIP handling), destination selection is
-unchanged. `use_sniffed_destination: true` and a non-empty `override_address`
-are mutually exclusive on the same route action and cause a configuration error.
-An earlier `route-options` action still applies normally; an earlier domain
-address override therefore remains a domain and is not replaced.
+When the effective setting is disabled, when no valid domain was sniffed, or
+when the destination is already a domain (including normal FakeIP handling),
+destination selection is unchanged. Explicit `use_sniffed_destination: true`
+and a non-empty `override_address` are mutually exclusive on the same route
+action and cause a configuration error. When this field is omitted, an
+`override_address` on the same action takes precedence over inheritance,
+whether it specifies an IP or a domain.
+
+An earlier `route-options` action still applies normally: a domain address
+override is not replaced, while an IP override remains eligible for replacement
+according to the effective setting. `override_port` is compatible with this option.
 
 This applies only to newly routed connections. It does not migrate established
 connections after a network change or restore the removed inbound
