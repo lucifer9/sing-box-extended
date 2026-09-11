@@ -1,16 +1,16 @@
-name: Dev CI
+name: RC CI
 
 on:
   push:
-    branches: [dev]
+    branches: [rc]
   pull_request:
-    branches: [dev]
+    branches: [rc]
 
 permissions:
   contents: read
 
 concurrency:
-  group: dev-ci-${{ github.event.pull_request.number || github.ref }}
+  group: rc-ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -28,21 +28,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26.7'
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: service/admin_panel/web/package-lock.json
-      - name: Build admin panel assets
-        working-directory: service/admin_panel/web
+      - name: Test RC publication logic
+        run: node --test .github/publish_rc_test.test.cjs
+      - name: Load RC build flags
         run: |
-          npm ci --no-audit --no-fund
-          npm run build
-      - name: Pack admin panel assets
-        run: go run ./cmd/internal/admin_panel_pack -dir service/admin_panel/dist
-      - name: Load release build flags
-        run: |
-          echo "BUILD_TAGS=$(<release/DEFAULT_BUILD_TAGS_OTHERS)" >> "$GITHUB_ENV"
+          echo "BUILD_TAGS=$(<release/DEFAULT_BUILD_TAGS_RC)" >> "$GITHUB_ENV"
           echo "LDFLAGS_SHARED=$(<release/LDFLAGS)" >> "$GITHUB_ENV"
       - name: Test main module
         run: go test -exec sudo -tags "$BUILD_TAGS" -ldflags "$LDFLAGS_SHARED" -timeout=10m ./...

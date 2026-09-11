@@ -24,10 +24,14 @@ DOCKER_PLATFORMS ?= linux/amd64,linux/arm64
 
 CRONET_GO_PATH ?= $(shell pwd)/cronet-go
 
-.PHONY: test release docs build schema
+.PHONY: test release docs build build_rc schema
 
 build:
 	go build $(MAIN_PARAMS) $(MAIN)
+
+build_rc: TAGS = $(shell cat release/DEFAULT_BUILD_TAGS_RC)
+build_rc: VERSION = $(shell CGO_ENABLED=0 GOOS=$(GOHOSTOS) GOARCH=$(GOHOSTARCH) go run ./cmd/internal/read_tag)
+build_rc: build
 
 build_admin_panel:
 	cd $(ADMIN_PANEL_WEB) && \
