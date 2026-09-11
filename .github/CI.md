@@ -53,7 +53,9 @@ Only after all four jobs succeed does the publish job update the moving
 `rc-test` tag and its non-draft pre-release. It is not marked as the latest
 release. Runs are serialized to prevent overlapping replacements. Each archive
 contains the executable, LICENSE, and BUILD_INFO.txt with its version, source
-commit, target, and tags. Version discovery ignores `rc-test` and other
+commit, target, and tags. The self-test version is
+`0.0.0-rc-test.<run-number>.<attempt>.g<short-sha>` and does not require any Git
+tags in the fork. General version discovery ignores `rc-test` and other
 non-version tags, matching only `v[0-9]*`.
 
 The following fixed URLs allow downloads without login while the repository

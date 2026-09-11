@@ -33,15 +33,13 @@ jobs:
           fi
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
         with:
-          fetch-depth: 0
           persist-credentials: false
       - name: Test RC publication logic
         run: node --test .github/publish_rc_test.test.cjs
       - name: Identify build
         id: version
         run: |
-          base=$(git describe --tags --match 'v[0-9]*' --abbrev=0)
-          version="${base#v}-rc-test.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}-${GITHUB_SHA:0:12}"
+          version="0.0.0-rc-test.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}.g${GITHUB_SHA:0:12}"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
   build:
