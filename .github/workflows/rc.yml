@@ -1,10 +1,12 @@
 name: RC CI
 
 on:
-  push:
-    branches: [rc]
-  pull_request:
-    branches: [rc]
+  workflow_dispatch:
+    
+#  push:
+#    branches: [rc]
+#  pull_request:
+#    branches: [rc]
 
 permissions:
   contents: read
