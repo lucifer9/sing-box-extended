@@ -6,7 +6,7 @@ const path = require('node:path');
 const { test } = require('node:test');
 const publish = require('./publish_rc_test.cjs');
 
-const archiveNames = ['linux-amd64', 'linux-arm64', 'macos-amd64', 'macos-arm64']
+const archiveNames = ['linux-amd64', 'linux-arm64', 'macos-arm64']
   .map((target) => `sing-box-rc-test-${target}.tar.gz`);
 
 async function fixture(t, { existing = false, uploadFailure = false, refStatus, immutable = false } = {}) {
