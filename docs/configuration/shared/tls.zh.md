@@ -152,7 +152,8 @@ icon: material/new-box
   "reality": {
     "enabled": false,
     "public_key": "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
-    "short_id": "0123456789abcdef"
+    "short_id": "0123456789abcdef",
+    "mldsa65_verify": ""
   }
 }
 ```
@@ -565,6 +566,33 @@ uTLS 是 "crypto/tls" 的一个分支，它提供了 ClientHello 指纹识别阻
 
 默认使用 chrome 指纹。
 
+对于 **REALITY 客户端**，实际 ClientHello 的 `key_share` 必须包含有效的
+`X25519MLKEM768`，且位于可选的 `X25519` share 之前。允许 GREASE 或其他 share
+在其前面；这不是 TLS 扩展顺序要求，也不要求服务端最终协商混合组。
+在 MetaCubeX/uTLS v1.8.7 中，`chrome`（也是默认值）是唯一合规的浏览器指纹。
+因此 REALITY 的 `random` 仅选择 Chrome，保持进程级选择生命周期，不会每次连接重新抽选。
+普通 uTLS 和 ShadowTLS 的选择行为不变。
+
+不合规的显式指纹在配置初始化时明确报错，不会重塑模板或悄悄替换。
+上文列出的已移除 `chrome_*` 别名在 REALITY 中也会被拒绝，请显式选择 `chrome`。
+每次连接发送前还会再次检查序列化后的 ClientHello。
+
+REALITY 的 `randomized` 在每次握手时生成新的 ClientHello spec，使用普通 uTLS
+初始化的同一个进程级 seed。配置克隆和后续连接保留该 seed，不会重新播种。
+生成的 spec 在 `supported_groups` 中包含 `X25519MLKEM768`，并将其 `key_share`
+置于 `X25519` 之前，实际密钥材料由 uTLS 为每次连接独立生成。
+其他随机选择（包括可选的 P-256 key share）保持不变。选中 ALPN 时保留配置的协议，
+ALPS 仅声明 ALPN 中包含的协议。普通 uTLS 的共享生成权重和行为也不变。这会生成合规 REALITY 指纹，
+不代表浏览器仿冒，也不保证每次连接的指纹不同。若生成器意外输出 TLS 1.2，
+会在发送任何握手字节前明确报错，不重试或回退。此功能不增加 ML-DSA-65 认证。
+
+这些要求以 [Xray-core v26.9.9](https://github.com/XTLS/Xray-core/blob/52a412d9e2f5c2a5142b1b4e2ab3771dacb8b120/transport/internet/reality/reality.go)
+及其[固定版本 REALITY 实现](https://github.com/XTLS/REALITY/blob/8cdf7bf9c7f09cb9814bf08c3eb877f68b85fba8/tls.go)为准。
+基础认证在存在独立 X25519 share 时优先使用其私钥，否则使用混合 share 中的 X25519 私钥，
+不会使用 ML-KEM 共享秘密替代认证密钥。
+固定 Xray 的载荷互通及 Linux kTLS 回归测试的可重复执行步骤，见源码仓库中的
+`test/reality_xray.md` 和 `test/reality_xray.py`。
+
 ### ECH 字段
 
 ECH (Encrypted Client Hello) 是一个 TLS 扩展，它允许客户端加密其 ClientHello 的第一部分信息。
@@ -806,6 +834,14 @@ ACME DNS01 验证字段。如果配置，将禁用其他验证方法。
 ==必填==
 
 公钥，由 `sing-box generate reality-keypair` 生成。
+
+#### mldsa65_verify
+
+可选的 REALITY 附加认证。填写服务端的 **1952 字节 ML-DSA-65 公共验证密钥**，使用无填充的 URL-safe Base64 编码。省略或留空表示关闭附加验证。编码或密钥长度错误会在构建客户端配置时被拒绝。
+
+配置后，原有 REALITY 认证和 ML-DSA-65 签名验证必须同时成功。密钥不匹配、缺少签名或签名无效均拒绝连接；普通受信任 TLS 证书不能授予代理访问权限。服务端必须支持并启用 ML-DSA-65 签名，例如 Xray v26.9.9。
+
+此密钥与 X25519 `public_key`、X25519MLKEM768 握手 key share 不同，也不是 seed、私钥或 PEM 证书。`sing-box generate reality-keypair` 生成 X25519 密钥，不生成此验证密钥。该字段仅用于出站，不启用服务端签名。字段名为 `mldsa65_verify`，不接受 Xray 的 `mldsa65Verify` 拼写。
 
 #### short_id
 

@@ -30,13 +30,13 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
-	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/debug"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
 	"github.com/sagernet/sing/common/ntp"
 	aTLS "github.com/sagernet/sing/common/tls"
 
+	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
 	utls "github.com/metacubex/utls"
 	"golang.org/x/crypto/hkdf"
 	"golang.org/x/net/http2"
@@ -45,10 +45,11 @@ import (
 var _ ConfigCompat = (*RealityClientConfig)(nil)
 
 type RealityClientConfig struct {
-	ctx       context.Context
-	uClient   *UTLSClientConfig
-	publicKey []byte
-	shortID   [8]byte
+	ctx           context.Context
+	uClient       *UTLSClientConfig
+	publicKey     []byte
+	shortID       [8]byte
+	mldsa65Verify *mldsa65.PublicKey
 }
 
 func NewRealityClient(ctx context.Context, logger logger.ContextLogger, serverAddress string, options option.OutboundTLSOptions) (Config, error) {
@@ -63,9 +64,38 @@ func newRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
 		return nil, E.New("spoof is unsupported in reality")
 	}
 
+	switch options.UTLS.Fingerprint {
+	case "chrome_psk", "chrome_psk_shuffle", "chrome_padding_psk_shuffle", "chrome_pq", "chrome_pq_psk":
+		return nil, E.New("REALITY fingerprint is retired; explicitly select a compliant fingerprint such as chrome")
+	}
+
+	// REALITY random has one native compliant candidate in uTLS v1.8.7.
+	// Keep this selection separate from ordinary uTLS's process-wide choice.
+	if options.UTLS.Fingerprint == "random" {
+		utlsOptions := *options.UTLS
+		utlsOptions.Fingerprint = "chrome"
+		options.UTLS = &utlsOptions
+	}
 	uClient, err := newUTLSClient(ctx, logger, serverAddress, options, allowEmptyServerName)
 	if err != nil {
 		return nil, err
+	}
+
+	if maxVersion := uClient.(*UTLSClientConfig).config.MaxVersion; maxVersion != 0 && maxVersion < utls.VersionTLS13 {
+		return nil, E.New("REALITY requires TLS 1.3")
+	}
+	if options.UTLS.Fingerprint != "randomized" {
+		// Build a local probe to catch deterministic template errors at startup.
+		// This is not a substitute for validating each connection's serialized hello.
+		probeConfig := uClient.(*UTLSClientConfig).config.Clone()
+		probeConfig.SessionTicketsDisabled = true
+		probe := utls.UClient(nil, probeConfig, uClient.(*UTLSClientConfig).id)
+		if err = probe.BuildHandshakeState(); err != nil {
+			return nil, E.Cause(err, "REALITY fingerprint")
+		}
+		if _, err = realityAuthenticationKey(probe.HandshakeState.Hello.Raw, probe.HandshakeState.State13.KeyShareKeys); err != nil {
+			return nil, err
+		}
 	}
 
 	publicKey, err := base64.RawURLEncoding.DecodeString(options.Reality.PublicKey)
@@ -74,6 +104,17 @@ func newRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
 	}
 	if len(publicKey) != 32 {
 		return nil, E.New("invalid public_key")
+	}
+	var mldsa65Verify *mldsa65.PublicKey
+	if options.Reality.MLDSA65Verify != "" {
+		keyBytes, decodeErr := base64.RawURLEncoding.DecodeString(options.Reality.MLDSA65Verify)
+		if decodeErr != nil {
+			return nil, E.Cause(decodeErr, "decode mldsa65_verify")
+		}
+		mldsa65Verify = new(mldsa65.PublicKey)
+		if err = mldsa65Verify.UnmarshalBinary(keyBytes); err != nil {
+			return nil, E.Cause(err, "invalid mldsa65_verify")
+		}
 	}
 	var shortID [8]byte
 	decodedLen, err := hex.Decode(shortID[:], []byte(options.Reality.ShortID))
@@ -84,7 +125,7 @@ func newRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
 		return nil, E.New("invalid short_id")
 	}
 
-	var config Config = &RealityClientConfig{ctx, uClient.(*UTLSClientConfig), publicKey, shortID}
+	var config Config = &RealityClientConfig{ctx, uClient.(*UTLSClientConfig), publicKey, shortID, mldsa65Verify}
 	if options.KernelRx || options.KernelTx {
 		if !C.IsLinux {
 			return nil, E.New("kTLS is only supported on Linux")
@@ -132,46 +173,53 @@ func (e *RealityClientConfig) Client(conn net.Conn) (Conn, error) {
 }
 
 func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn) (aTLS.Conn, error) {
-	verifier := &realityVerifier{
-		serverName: e.uClient.ServerName(),
-	}
 	uConfig := e.uClient.config.Clone()
+	id := e.uClient.id
+	if id.Client == utls.HelloRandomized.Client {
+		spec, err := realityRandomizedSpec(id, uConfig.NextProtos)
+		if err != nil {
+			return nil, err
+		}
+		uConn := utls.UClient(conn, uConfig, utls.HelloCustom)
+		if err = uConn.ApplyPreset(spec); err != nil {
+			return nil, E.Cause(err, "REALITY randomized fingerprint")
+		}
+		return e.clientHandshake(ctx, uConn, uConfig)
+	}
+	uConn := utls.UClient(conn, uConfig, id)
+	return e.clientHandshake(ctx, uConn, uConfig)
+}
+
+func (e *RealityClientConfig) clientHandshake(ctx context.Context, uConn *utls.UConn, uConfig *utls.Config) (aTLS.Conn, error) {
+	verifier := &realityVerifier{UConn: uConn, serverName: e.uClient.ServerName(), mldsa65Verify: e.mldsa65Verify}
 	uConfig.InsecureSkipVerify = true
 	uConfig.SessionTicketsDisabled = true
 	uConfig.VerifyPeerCertificate = verifier.VerifyPeerCertificate
-	uConn := utls.UClient(conn, uConfig, e.uClient.id)
-	verifier.UConn = uConn
+	nextProtos := uConfig.NextProtos
 	err := uConn.BuildHandshakeState()
 	if err != nil {
 		return nil, err
 	}
-	for _, extension := range uConn.Extensions {
-		if ce, ok := extension.(*utls.SupportedCurvesExtension); ok {
-			ce.Curves = common.Filter(ce.Curves, func(curveID utls.CurveID) bool {
-				return curveID != utls.X25519MLKEM768
-			})
-		}
-		if ks, ok := extension.(*utls.KeyShareExtension); ok {
-			ks.KeyShares = common.Filter(ks.KeyShares, func(share utls.KeyShare) bool {
-				return share.Group != utls.X25519MLKEM768
-			})
-		}
-	}
-	err = uConn.BuildHandshakeState()
-	if err != nil {
-		return nil, err
-	}
-
-	if len(uConfig.NextProtos) > 0 {
+	if len(nextProtos) > 0 {
 		for _, extension := range uConn.Extensions {
 			if alpnExtension, isALPN := extension.(*utls.ALPNExtension); isALPN {
-				alpnExtension.AlpnProtocols = uConfig.NextProtos
+				alpnExtension.AlpnProtocols = nextProtos
 				break
 			}
 		}
 	}
 
+	// Serialize ALPN and all other extensions before checking/authenticating the
+	// bytes. uTLS v1.8.7 rebuilds from these same extensions at handshake entry;
+	// SessionTicketsDisabled prevents its session controller from patching them.
+	if err = uConn.BuildHandshakeState(); err != nil {
+		return nil, err
+	}
 	hello := uConn.HandshakeState.Hello
+	ecdheKey, err := realityAuthenticationKey(hello.Raw, uConn.HandshakeState.State13.KeyShareKeys)
+	if err != nil {
+		return nil, err
+	}
 	hello.SessionId = make([]byte, 32)
 	copy(hello.Raw[39:], hello.SessionId)
 
@@ -188,20 +236,9 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	hello.SessionId[2] = 11
 	binary.BigEndian.PutUint32(hello.SessionId[4:], uint32(time.Now().Unix()))
 	copy(hello.SessionId[8:], e.shortID[:])
-	if debug.Enabled {
-		fmt.Printf("REALITY hello.sessionId[:16]: %v\n", hello.SessionId[:16])
-	}
 	publicKey, err := ecdh.X25519().NewPublicKey(e.publicKey)
 	if err != nil {
 		return nil, err
-	}
-	keyShareKeys := uConn.HandshakeState.State13.KeyShareKeys
-	if keyShareKeys == nil {
-		return nil, E.New("nil KeyShareKeys")
-	}
-	ecdheKey := keyShareKeys.Ecdhe
-	if ecdheKey == nil {
-		return nil, E.New("nil ecdheKey")
 	}
 	authKey, err := ecdheKey.ECDH(publicKey)
 	if err != nil {
@@ -219,10 +256,6 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	aesGcmCipher, _ := cipher.NewGCM(aesBlock)
 	aesGcmCipher.Seal(hello.SessionId[:0], hello.Random[20:], hello.SessionId[:16], hello.Raw)
 	copy(hello.Raw[39:], hello.SessionId)
-	if debug.Enabled {
-		fmt.Printf("REALITY hello.sessionId: %v\n", hello.SessionId)
-		fmt.Printf("REALITY uConn.AuthKey: %v\n", authKey)
-	}
 
 	err = uConn.HandshakeContext(ctx)
 	if err != nil {
@@ -271,25 +304,40 @@ func (e *RealityClientConfig) Clone() Config {
 		e.uClient.Clone().(*UTLSClientConfig),
 		e.publicKey,
 		e.shortID,
+		e.mldsa65Verify,
 	}
 }
 
 type realityVerifier struct {
 	*utls.UConn
-	serverName string
-	authKey    []byte
-	verified   bool
+	serverName    string
+	authKey       []byte
+	verified      bool
+	mldsa65Verify *mldsa65.PublicKey
 }
 
 func (c *realityVerifier) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 	p, _ := reflect.TypeFor[utls.Conn]().FieldByName("peerCertificates")
 	certs := *(*([]*x509.Certificate))(unsafe.Add(unsafe.Pointer(c.Conn), p.Offset))
+	if len(certs) == 0 || certs[0] == nil {
+		return E.New("reality: missing peer certificate")
+	}
 	if pub, ok := certs[0].PublicKey.(ed25519.PublicKey); ok {
 		h := hmac.New(sha512.New, c.authKey)
 		h.Write(pub)
 		if bytes.Equal(h.Sum(nil), certs[0].Signature) {
-			c.verified = true
-			return nil
+			if c.mldsa65Verify == nil {
+				c.verified = true
+			} else if len(certs[0].Extensions) > 0 {
+				// Continue the base HMAC over the actual handshake messages. The
+				// first extension contains the raw signature, irrespective of its OID.
+				h.Write(c.HandshakeState.Hello.Raw)
+				h.Write(c.HandshakeState.ServerHello.Raw)
+				c.verified = mldsa65.Verify(c.mldsa65Verify, h.Sum(nil), nil, certs[0].Extensions[0].Value)
+			}
+			if c.verified {
+				return nil
+			}
 		}
 	}
 	opts := x509.VerifyOptions{
