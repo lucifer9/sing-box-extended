@@ -6,7 +6,6 @@ const tag = 'rc-test';
 const archives = [
   'sing-box-rc-test-linux-amd64.tar.gz',
   'sing-box-rc-test-linux-arm64.tar.gz',
-  // 'sing-box-rc-test-macos-amd64.tar.gz',
   'sing-box-rc-test-macos-arm64.tar.gz',
 ];
 
@@ -19,7 +18,7 @@ module.exports = async function publish({ github, context, core, version, direct
   // Check the complete download set before changing any remote state.
   const files = (await fs.readdir(directory)).sort();
   if (files.join('\n') !== [...archives].sort().join('\n')) {
-    throw new Error('Expected exactly the four RC CLI archives');
+    throw new Error(`Expected exactly ${archives.length} RC CLI archives`);
   }
   const checksums = [];
   for (const name of archives) {

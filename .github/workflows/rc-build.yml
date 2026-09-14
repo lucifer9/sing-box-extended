@@ -53,7 +53,6 @@ jobs:
         include:
           - { platform: linux, goos: linux, arch: amd64, runner: ubuntu-24.04, cgo: '0' }
           - { platform: linux, goos: linux, arch: arm64, runner: ubuntu-24.04-arm, cgo: '0' }
-          # - { platform: macos, goos: darwin, arch: amd64, runner: macos-15-intel, cgo: '1' }
           - { platform: macos, goos: darwin, arch: arm64, runner: macos-15, cgo: '0' }
     env:
       GOOS: ${{ matrix.goos }}

@@ -24,6 +24,7 @@ async function fixture(t, { existing = false, uploadFailure = false, refStatus, 
     createRelease: method('createRelease', () => release),
     listReleaseAssets: method('listReleaseAssets', () => existing ? [
       ...archiveNames.map((name, id) => ({ name, id })),
+      { name: 'sing-box-rc-test-macos-amd64.tar.gz', id: 3 },
       { name: 'SHA256SUMS', id: 4 },
       { name: 'unrelated.txt', id: 99 },
     ] : []),
@@ -92,11 +93,11 @@ test('first publication uploads all downloads before publishing a non-latest pre
   assert.ok(summary.text.includes('https://github.com/example/sing-box/releases/download/rc-test/'));
 });
 
-test('replaces only RC assets and moves the existing tag after uploads succeed', async (t) => {
+test('replaces current RC assets, preserves retired assets, and moves the tag after uploads succeed', async (t) => {
   const { options, calls } = await fixture(t, { existing: true });
   await publish(options);
   assert.equal(calls.some((call) => call.name === 'createRelease' || call.name === 'createRef'), false);
-  assert.deepEqual(calls.filter((call) => call.name === 'deleteReleaseAsset').map((call) => call.args.asset_id), [0, 1, 2, 3, 4]);
+  assert.deepEqual(calls.filter((call) => call.name === 'deleteReleaseAsset').map((call) => call.args.asset_id), [0, 1, 2, 4]);
   const movedAt = calls.findIndex((call) => call.name === 'updateRef');
   assert.ok(movedAt > calls.findLastIndex((call) => call.name === 'uploadReleaseAsset'));
   assert.equal(calls[movedAt].args.sha, options.context.sha);
@@ -104,13 +105,16 @@ test('replaces only RC assets and moves the existing tag after uploads succeed',
 });
 
 test('rejects incomplete, empty, or unexpected downloads before contacting GitHub', async (t) => {
-  for (const invalid of ['missing', 'empty', 'extra']) {
+  for (const invalid of ['missing', 'empty', 'extra', 'retired-platform']) {
     await t.test(invalid, async (t) => {
       const { options, calls } = await fixture(t);
       const first = path.join(options.directory, archiveNames[0]);
       if (invalid === 'missing') await fs.unlink(first);
       if (invalid === 'empty') await fs.writeFile(first, '');
       if (invalid === 'extra') await fs.writeFile(path.join(options.directory, 'unexpected.apk'), 'apk');
+      if (invalid === 'retired-platform') {
+        await fs.writeFile(path.join(options.directory, 'sing-box-rc-test-macos-amd64.tar.gz'), 'retired binary');
+      }
       await assert.rejects(publish(options), /archive/);
       assert.deepEqual(calls, []);
     });
