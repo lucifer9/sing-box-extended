@@ -13921,6 +13921,9 @@
         },
         "short_id": {
           "type": "string"
+        },
+        "mldsa65_verify": {
+          "type": "string"
         }
       },
       "additionalProperties": false

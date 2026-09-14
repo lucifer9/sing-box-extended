@@ -8,6 +8,7 @@ processes. Never uses a system Xray implicitly or prints process configuration.
 import argparse
 import base64
 import contextlib
+import copy
 import http.server
 import json
 import os
@@ -123,6 +124,83 @@ def workspace():
         shutil.rmtree(directory)
 
 
+def mldsa_matrix(args, directory, stack, xr_server, server_ports, public, short, user, target_port):
+    # Xray's command emits seed and verification key. Keep both in the private
+    # workspace/process configuration; never print their values.
+    keys = dict(line.split(": ", 1) for line in subprocess.check_output(
+        [str(args.xray), "mldsa65"], text=True).strip().splitlines())
+    wrong = dict(line.split(": ", 1) for line in subprocess.check_output(
+        [str(args.xray), "mldsa65"], text=True).strip().splitlines())["Verify"]
+    signed_port = port()
+    signed_server = copy.deepcopy(xr_server)
+    signed_server["inbounds"][0]["port"] = signed_port
+    signed_server["inbounds"][0]["streamSettings"]["realitySettings"]["mldsa65Seed"] = keys["Seed"]
+    stack.enter_context(process(args.xray, signed_server, directory, "xr-signed-server", signed_port))
+    servers = server_ports + [("xray-signed", signed_port)]
+    for server_name, server_port in servers:
+        for verification, verify in [("absent", ""), ("correct", keys["Verify"]), ("wrong", wrong)]:
+            success = not verify or (server_name == "xray-signed" and verification == "correct")
+            for client_kind, fingerprints in [("sb", ["", "chrome", "random", "randomized"]),
+                                               ("xr", ["chrome"])]:
+                for fingerprint in fingerprints:
+                    client_port = port()
+                    name = f"mldsa-{client_kind}-{server_name}-{verification}-{fingerprint or 'default'}"
+                    if client_kind == "sb":
+                        reality = {"enabled": True, "public_key": public, "short_id": short}
+                        if verify:
+                            reality["mldsa65_verify"] = verify
+                        config = {"log": {"level": "error"}, "inbounds": [{"type": "socks",
+                            "listen": "127.0.0.1", "listen_port": client_port}], "outbounds": [{
+                            "type": "vless", "server": "127.0.0.1", "server_port": server_port,
+                            "uuid": user, "tls": {"enabled": True, "server_name": "localhost",
+                            "utls": {"enabled": True, "fingerprint": fingerprint}, "reality": reality}}]}
+                        binary = args.sing_box
+                    else:
+                        reality = {"serverName": "localhost", "fingerprint": fingerprint,
+                                   "password": public, "shortId": short}
+                        if verify:
+                            reality["mldsa65Verify"] = verify
+                        config = {"log": {"loglevel": "none"}, "inbounds": [{"listen": "127.0.0.1",
+                            "port": client_port, "protocol": "socks", "settings": {"auth": "noauth"}}],
+                            "outbounds": [{"protocol": "vless", "settings": {"vnext": [{
+                            "address": "127.0.0.1", "port": server_port, "users": [{"id": user,
+                            "encryption": "none"}]}]}, "streamSettings": {"network": "tcp",
+                            "security": "reality", "realitySettings": reality}}]}
+                        binary = args.xray
+                    with process(binary, config, directory, name, client_port):
+                        iterations = 3 if fingerprint == "randomized" else 1
+                        for _ in range(iterations):
+                            if success:
+                                payload_roundtrip(client_port, target_port)
+                            else:
+                                rejected_payload(client_port, target_port)
+                        print("PASS", name, iterations, "payload echo(s)" if success else "rejection(s)")
+
+
+def rejected_payload(proxy, target):
+    # The proxy must be listening and negotiate SOCKS before the upstream probe.
+    # A timeout, broken readiness probe, or payload corruption is not rejection.
+    with socket.create_connection(("127.0.0.1", proxy), timeout=15) as sock:
+        sock.sendall(b"\x05\x01\x00")
+        assert receive(sock, 2) == b"\x05\x00", "SOCKS authentication"
+        sock.sendall(b"\x05\x01\x00\x01\x7f\x00\x00\x01" + struct.pack("!H", target))
+        header = receive(sock, 4)
+        assert header[0] == 5, "SOCKS response version"
+        if header[1] != 0:
+            return
+        address_size = {1: 4, 4: 16}.get(header[3])
+        if header[3] == 3:
+            address_size = receive(sock, 1)[0]
+        assert address_size is not None, "SOCKS address type"
+        receive(sock, address_size + 2)
+        # Xray acknowledges SOCKS before authenticating the outbound connection.
+        try:
+            sock.sendall(b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1\r\n\r\nx")
+            assert sock.recv(1) == b"", "rejected connection exposed application data"
+        except (ConnectionResetError, BrokenPipeError):
+            pass
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sing-box", type=Path, required=True)
@@ -145,6 +223,9 @@ def main():
         directory = Path(tmp)
         subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
                         "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost",
+                        # REALITY needs room for its 3309-byte signature in the
+                        # mirrored certificate record. This is public padding.
+                        "-addext", "1.2.3.4=DER:" + "00" * 5000,
                         "-keyout", str(directory / "key.pem"), "-out", str(directory / "cert.pem")],
                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -184,6 +265,8 @@ def main():
                         "settings": {"finalRules": [{"action": "allow", "ip": ["127.0.0.1/32"], "port": str(target_port)}]}}]}
             stack.enter_context(process(server_binary, sb_server, directory, "sb-server", sb_port))
             stack.enter_context(process(args.xray, xr_server, directory, "xr-server", xr_port))
+            mldsa_matrix(args, directory, stack, xr_server, [("xray", xr_port), ("sing-box", sb_port)],
+                         public, short, user, target_port)
             for server_name, server_port in [("xray", xr_port), ("sing-box", sb_port)]:
                 for fingerprint in ["", "chrome", "random", "randomized"]:
                     modes = [(False, False)]

@@ -152,7 +152,8 @@ icon: material/new-box
   "reality": {
     "enabled": false,
     "public_key": "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
-    "short_id": "0123456789abcdef"
+    "short_id": "0123456789abcdef",
+    "mldsa65_verify": ""
   }
 }
 ```
@@ -833,6 +834,14 @@ ACME DNS01 验证字段。如果配置，将禁用其他验证方法。
 ==必填==
 
 公钥，由 `sing-box generate reality-keypair` 生成。
+
+#### mldsa65_verify
+
+可选的 REALITY 附加认证。填写服务端的 **1952 字节 ML-DSA-65 公共验证密钥**，使用无填充的 URL-safe Base64 编码。省略或留空表示关闭附加验证。编码或密钥长度错误会在构建客户端配置时被拒绝。
+
+配置后，原有 REALITY 认证和 ML-DSA-65 签名验证必须同时成功。密钥不匹配、缺少签名或签名无效均拒绝连接；普通受信任 TLS 证书不能授予代理访问权限。服务端必须支持并启用 ML-DSA-65 签名，例如 Xray v26.9.9。
+
+此密钥与 X25519 `public_key`、X25519MLKEM768 握手 key share 不同，也不是 seed、私钥或 PEM 证书。`sing-box generate reality-keypair` 生成 X25519 密钥，不生成此验证密钥。该字段仅用于出站，不启用服务端签名。字段名为 `mldsa65_verify`，不接受 Xray 的 `mldsa65Verify` 拼写。
 
 #### short_id
 
