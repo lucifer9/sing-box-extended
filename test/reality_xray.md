@@ -125,10 +125,22 @@ No server, dependency or system binary was modified. The previously unloaded
 - [Its REALITY key-share checks](https://github.com/XTLS/REALITY/blob/8cdf7bf9c7f09cb9814bf08c3eb877f68b85fba8/tls.go)
 - MetaCubeX/uTLS v1.8.7 (`u_parrots.go`, `u_conn.go`, `u_public.go`); leave pinned.
 
-The expanded issue #5 matrix described here has not yet been run; the issue #4
-results above do not validate its new randomized cases. REALITY `randomized` now
-builds a fresh spec per handshake with the same process-wide seed initialized by
-ordinary uTLS, including across configuration clones and sequential connections.
+On 2026-09-14, the expanded issue #5 matrix passed all 28 configurations and 44
+payload connections on arch1, including all randomized repetitions and requested
+kTLS directions. The run reused the user's existing Xray binary; its version,
+source checkout and Go build metadata all identified the pinned commit above, with
+`vcs.modified=false`. The independent sing-box
+server was built from `6a6a1e0a3172eb92fb1d64779776823aafaea0c3` with Go 1.26.4.
+The client used the corrected sources committed as `18dfab3a`, built before that
+commit was finalized; its build metadata therefore reads `a56e0c79` with
+`vcs.modified=true`. Its SHA-256 was
+`de8ce47893ee0177e4d96f5f871969417babe6107db0c04921eccd1bd75a068f`,
+matching the local build and remote tested binary. No system Xray, existing service,
+or pre-existing Xray build directory was modified.
+
+REALITY `randomized` builds a fresh spec per handshake with the same process-wide
+seed initialized by ordinary uTLS, including across configuration clones and
+sequential connections.
 It constrains hybrid `supported_groups`/`key_share` ordering before native uTLS key
 generation while retaining optional P-256 choices and ordinary shared weights.
 Every successfully generated hello must be compliant. Unexpected TLS 1.2 generator
@@ -168,8 +180,12 @@ kTLS 模块若未加载，先获得主机所有者授权再执行 `sudo -n modpr
 并只输出路径，供本地检查后删除。不要分享配置或原始日志，不要开启 `show`、debug
 构建标签或 shell tracing。所有自建进程均由脚本停止；构建目录需要手工清理。
 
-issue #4 的原有 20 项曾在 arch1 全部通过（含独立基线服务端与真实 kTLS）。此处扩展的
-issue #5 矩阵尚未执行，旧结果不能作为新增 randomized 用例的验证结果。
+2026-09-14，issue #5 扩展矩阵在 arch1 通过全部 28 个配置、44 次载荷连接，包括
+randomized 的所有连续连接及要求的 kTLS 方向。测试复用了用户提供的 Xray 二进制，
+版本信息与源码 checkout 均确认固定提交；本项目基线服务端从 `6a6a1e0a` 独立构建。
+客户端使用后来提交为 `18dfab3a` 的修正源码，在提交更新前构建，因此版本元数据仍为
+`a56e0c79` 且 `vcs.modified=true`。本地与远端二进制的 SHA-256 一致，见上方英文记录。
+未修改系统 Xray、已有服务或既有 Xray 构建目录。
 REALITY `randomized` 每次握手生成独立 spec，保留普通 uTLS 初始化的进程级 seed，
 配置克隆和连续连接不重新播种；在 uTLS 原生密钥生成前约束混合组及 share 顺序，
 保留可选 P-256、普通共享权重、显式指纹及 `random` 行为。成功生成的 ClientHello
