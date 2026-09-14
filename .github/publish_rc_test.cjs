@@ -6,7 +6,7 @@ const tag = 'rc-test';
 const archives = [
   'sing-box-rc-test-linux-amd64.tar.gz',
   'sing-box-rc-test-linux-arm64.tar.gz',
-  'sing-box-rc-test-macos-amd64.tar.gz',
+  // 'sing-box-rc-test-macos-amd64.tar.gz',
   'sing-box-rc-test-macos-arm64.tar.gz',
 ];
 
