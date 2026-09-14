@@ -161,7 +161,19 @@ func (e *RealityClientConfig) Client(conn net.Conn) (Conn, error) {
 
 func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn) (aTLS.Conn, error) {
 	uConfig := e.uClient.config.Clone()
-	uConn := utls.UClient(conn, uConfig, e.uClient.id)
+	id := e.uClient.id
+	if id.Client == utls.HelloRandomized.Client {
+		spec, err := realityRandomizedSpec(id, uConfig.NextProtos)
+		if err != nil {
+			return nil, err
+		}
+		uConn := utls.UClient(conn, uConfig, utls.HelloCustom)
+		if err = uConn.ApplyPreset(spec); err != nil {
+			return nil, E.Cause(err, "REALITY randomized fingerprint")
+		}
+		return e.clientHandshake(ctx, uConn, uConfig)
+	}
+	uConn := utls.UClient(conn, uConfig, id)
 	return e.clientHandshake(ctx, uConn, uConfig)
 }
 

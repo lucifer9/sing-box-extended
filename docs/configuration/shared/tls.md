@@ -579,10 +579,19 @@ selecting again for each connection. Ordinary uTLS and ShadowTLS selection are u
 Incompatible explicit fingerprints fail during configuration initialization rather
 than being rewritten or silently replaced. The retired `chrome_*` aliases listed
 above are also rejected for REALITY; select `chrome` explicitly. Each connection's
-serialized ClientHello is checked again before sending. `randomized` retains its
-existing generation policy for now: compliant outputs are accepted, but outputs
-without the required shares/order fail before sending, even when configuration
-initialization succeeded. Use `chrome` for reliable REALITY handshakes.
+serialized ClientHello is checked again before sending.
+
+REALITY `randomized` generates a fresh ClientHello spec for every handshake using
+the same process-wide seed initialized by ordinary uTLS. Configuration clones and
+successive connections retain that seed; they do not reseed. The generated spec
+includes `X25519MLKEM768` in `supported_groups` and places its `key_share` before
+`X25519`, with uTLS generating fresh key material for each connection. Other randomized
+choices, including the optional P-256 key share, are preserved. When ALPN is selected,
+its configured protocols are retained and ALPS only advertises protocols included in ALPN.
+Ordinary uTLS's shared generation weights and behavior are unchanged. This generates a compliant REALITY fingerprint;
+it does not impersonate a browser or promise a different fingerprint on each connection.
+Unexpected TLS 1.2 generator output explicitly fails before any handshake bytes
+are sent, without retries or fallback. This does not add ML-DSA-65 authentication.
 
 These requirements follow [Xray-core v26.9.9](https://github.com/XTLS/Xray-core/blob/52a412d9e2f5c2a5142b1b4e2ab3771dacb8b120/transport/internet/reality/reality.go)
 and its [pinned REALITY implementation](https://github.com/XTLS/REALITY/blob/8cdf7bf9c7f09cb9814bf08c3eb877f68b85fba8/tls.go).

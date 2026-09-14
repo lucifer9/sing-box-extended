@@ -574,9 +574,16 @@ uTLS 是 "crypto/tls" 的一个分支，它提供了 ClientHello 指纹识别阻
 
 不合规的显式指纹在配置初始化时明确报错，不会重塑模板或悄悄替换。
 上文列出的已移除 `chrome_*` 别名在 REALITY 中也会被拒绝，请显式选择 `chrome`。
-每次连接发送前还会再次检查序列化后的 ClientHello。`randomized` 暂时保留原有生成策略：
-接受合规输出，但缺失必要 share 或顺序不合规的输出会在发送前报错，即使配置初始化已通过。
-需要稳定的 REALITY 握手时请使用 `chrome`。
+每次连接发送前还会再次检查序列化后的 ClientHello。
+
+REALITY 的 `randomized` 在每次握手时生成新的 ClientHello spec，使用普通 uTLS
+初始化的同一个进程级 seed。配置克隆和后续连接保留该 seed，不会重新播种。
+生成的 spec 在 `supported_groups` 中包含 `X25519MLKEM768`，并将其 `key_share`
+置于 `X25519` 之前，实际密钥材料由 uTLS 为每次连接独立生成。
+其他随机选择（包括可选的 P-256 key share）保持不变。选中 ALPN 时保留配置的协议，
+ALPS 仅声明 ALPN 中包含的协议。普通 uTLS 的共享生成权重和行为也不变。这会生成合规 REALITY 指纹，
+不代表浏览器仿冒，也不保证每次连接的指纹不同。若生成器意外输出 TLS 1.2，
+会在发送任何握手字节前明确报错，不重试或回退。此功能不增加 ML-DSA-65 认证。
 
 这些要求以 [Xray-core v26.9.9](https://github.com/XTLS/Xray-core/blob/52a412d9e2f5c2a5142b1b4e2ab3771dacb8b120/transport/internet/reality/reality.go)
 及其[固定版本 REALITY 实现](https://github.com/XTLS/REALITY/blob/8cdf7bf9c7f09cb9814bf08c3eb877f68b85fba8/tls.go)为准。

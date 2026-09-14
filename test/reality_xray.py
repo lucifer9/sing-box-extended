@@ -185,9 +185,9 @@ def main():
             stack.enter_context(process(server_binary, sb_server, directory, "sb-server", sb_port))
             stack.enter_context(process(args.xray, xr_server, directory, "xr-server", xr_port))
             for server_name, server_port in [("xray", xr_port), ("sing-box", sb_port)]:
-                for fingerprint in ["", "chrome", "random"]:
+                for fingerprint in ["", "chrome", "random", "randomized"]:
                     modes = [(False, False)]
-                    if args.ktls and fingerprint == "":
+                    if args.ktls and fingerprint in ["", "randomized"]:
                         modes += [(True, False), (False, True), (True, True)]
                     for tx, rx in modes:
                         client_port = port()
@@ -198,13 +198,21 @@ def main():
                                 "server_name": "localhost", "kernel_tx": tx, "kernel_rx": rx,
                                 "utls": {"enabled": True, "fingerprint": fingerprint},
                                 "reality": {"enabled": True, "public_key": public, "short_id": short}}}]}
+                        iterations = 3 if fingerprint == "randomized" else 1
                         with process(args.sing_box, config, directory, name, client_port) as log:
-                            payload_roundtrip(client_port, target_port)
-                            text = log.read_text()
-                            for enabled, direction in [(tx, "TX"), (rx, "RX")]:
-                                if enabled:
-                                    assert f"ktls: kernel TLS {direction} enabled" in text, "kTLS not active"
-                            print("PASS", name, "authenticated 262144-byte echo")
+                            with log.open("rb") as events:
+                                for iteration in range(1, iterations + 1):
+                                    # Only this fresh connection's events may satisfy the check.
+                                    # Keep the client process (and its randomized seed) alive.
+                                    events.seek(0, os.SEEK_END)
+                                    payload_roundtrip(client_port, target_port)
+                                    text = events.read()
+                                    for enabled, direction in [(tx, "TX"), (rx, "RX")]:
+                                        if enabled:
+                                            event = f"ktls: kernel TLS {direction} enabled".encode()
+                                            assert text.count(event) == 1, (
+                                                f"{name} iteration {iteration}: expected one kTLS {direction} activation")
+                            print("PASS", name, f"{iterations} authenticated 262144-byte echo(s)")
                 client_port = port()
                 config = {"log": {"loglevel": "none"}, "inbounds": [{"listen": "127.0.0.1", "port": client_port,
                     "protocol": "socks", "settings": {"auth": "noauth"}}], "outbounds": [{"protocol": "vless",

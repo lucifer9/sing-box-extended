@@ -7,10 +7,12 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdh"
+	"crypto/mlkem"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net"
 	"slices"
@@ -22,6 +24,7 @@ import (
 
 	utls "github.com/metacubex/utls"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/cryptobyte"
 	"golang.org/x/crypto/hkdf"
 )
 
@@ -94,6 +97,8 @@ func checkRealityWireAuthentication(t *testing.T, raw []byte, serverKey *ecdh.Pr
 		case utls.X25519MLKEM768:
 			require.Nil(t, independent, "hybrid must precede optional X25519")
 			require.Len(t, share.Data, 1216)
+			_, err := mlkem.NewEncapsulationKey768(share.Data[:1184])
+			require.NoError(t, err, "wire ML-KEM encapsulation key must be valid")
 			hybrid = share.Data[1184:]
 		case utls.X25519:
 			require.Len(t, share.Data, 32)
@@ -323,38 +328,220 @@ func TestRealityClientRejectsTLS12Configuration(t *testing.T) {
 	require.ErrorContains(t, err, "TLS 1.3")
 }
 
-func TestRealityClientRandomizedFailsClosed(t *testing.T) {
-	serverKey, err := ecdh.X25519().GenerateKey(rand.Reader)
-	require.NoError(t, err)
-	options := realityTestOptions("randomized")
-	options.Reality.PublicKey = base64.RawURLEncoding.EncodeToString(serverKey.PublicKey().Bytes())
-	options.Reality.ShortID = "0102030405060708"
-	config, err := NewRealityClient(context.Background(), logger.NOP(), "", options)
-	require.NoError(t, err)
-	realityConfig := config.(*RealityClientConfig)
-	// Include the process-wide production seed, followed by deterministic seeds.
-	var sent, rejected int
-	for i := -1; i < 32; i++ {
-		candidate := realityConfig.Clone().(*RealityClientConfig)
-		if i >= 0 {
-			var seed utls.PRNGSeed
-			seed[0] = byte(i)
-			candidate.uClient.id.Seed = &seed
+// Preserve all wire fields, including extension order, except fresh cryptographic
+// material. cryptobyte slices alias the copy, never the captured authentication AAD.
+func realityRandomizedWireShape(t *testing.T, raw []byte) []byte {
+	t.Helper()
+	shape := slices.Clone(raw)
+	input := cryptobyte.String(shape)
+	require.True(t, input.Skip(6)) // handshake header and legacy version
+	var random []byte
+	var session, ciphers, compression, extensions cryptobyte.String
+	require.True(t, input.ReadBytes(&random, 32))
+	require.True(t, input.ReadUint8LengthPrefixed(&session))
+	clear(random)
+	clear(session)
+	require.True(t, input.ReadUint16LengthPrefixed(&ciphers))
+	require.True(t, input.ReadUint8LengthPrefixed(&compression))
+	require.True(t, input.ReadUint16LengthPrefixed(&extensions))
+	require.True(t, input.Empty())
+	for !extensions.Empty() {
+		var id uint16
+		var data cryptobyte.String
+		require.True(t, extensions.ReadUint16(&id))
+		require.True(t, extensions.ReadUint16LengthPrefixed(&data))
+		if id != 51 {
+			continue
 		}
-		raw, err := captureRealityClientHello(t, func(conn net.Conn) error {
-			_, err := candidate.ClientHandshake(context.Background(), conn)
-			return err
-		})
-		if len(raw) == 0 {
-			require.ErrorContains(t, err, "X25519MLKEM768")
-			rejected++
-		} else {
-			checkRealityWireAuthentication(t, raw, serverKey)
-			sent++
+		var shares cryptobyte.String
+		require.True(t, data.ReadUint16LengthPrefixed(&shares))
+		require.True(t, data.Empty())
+		for !shares.Empty() {
+			var group uint16
+			var public cryptobyte.String
+			require.True(t, shares.ReadUint16(&group))
+			require.True(t, shares.ReadUint16LengthPrefixed(&public))
+			clear(public)
 		}
 	}
-	require.Positive(t, sent, "native compliant randomized output must retain its shares")
-	require.Positive(t, rejected, "noncompliant randomized output must fail before sending")
+	return shape
+}
+
+func TestRealityClientRandomizedSendsAuthenticatedHybridClientHello(t *testing.T) {
+	serverKey, err := ecdh.X25519().GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	globalID := randomizedFingerprint
+	globalSeed, globalWeights, defaults := *globalID.Seed, *globalID.Weights, utls.DefaultWeights
+	defer func() {
+		require.Equal(t, globalID, randomizedFingerprint)
+		require.Equal(t, globalSeed, *randomizedFingerprint.Seed)
+		require.Equal(t, globalWeights, *randomizedFingerprint.Weights)
+		require.Equal(t, defaults, utls.DefaultWeights)
+	}()
+	shapes := make(map[string]bool)
+	p256 := make(map[bool]bool)
+	for i := -1; i < 32; i++ {
+		seed := globalSeed
+		name := "process"
+		if i >= 0 {
+			seed = utls.PRNGSeed{}
+			seed[0] = byte(i)
+			name = fmt.Sprintf("seed-%02x", i)
+		}
+		t.Run(name, func(t *testing.T) {
+			options := realityTestOptions("randomized")
+			options.Reality.PublicKey = base64.RawURLEncoding.EncodeToString(serverKey.PublicKey().Bytes())
+			options.Reality.ShortID = "0102030405060708"
+			options.ALPN = []string{"h2", "http/1.1"}
+			originalOptions := options
+			originalUTLS, originalReality := *options.UTLS, *options.Reality
+			originalOptions.UTLS, originalOptions.Reality = &originalUTLS, &originalReality
+			originalOptions.ALPN = slices.Clone(options.ALPN)
+			ordinaryShape := func() []byte {
+				config, err := NewUTLSClient(context.Background(), logger.NOP(), "", options)
+				require.NoError(t, err)
+				localSeed := seed
+				config.(*UTLSClientConfig).id.Seed = &localSeed
+				raw, err := captureRealityClientHello(t, func(conn net.Conn) error {
+					wrapped, err := config.Client(conn)
+					if err != nil {
+						return err
+					}
+					return wrapped.HandshakeContext(context.Background())
+				})
+				require.Error(t, err)
+				require.NotNil(t, utls.UnmarshalClientHello(raw))
+				require.Equal(t, seed, localSeed)
+				return realityRandomizedWireShape(t, raw)
+			}
+			before := ordinaryShape()
+			config, err := NewRealityClient(context.Background(), logger.NOP(), "", options)
+			require.NoError(t, err)
+			candidate := config.(*RealityClientConfig)
+			localSeed := seed
+			candidate.uClient.id.Seed = &localSeed
+			clone := candidate.Clone().(*RealityClientConfig)
+			var firstShape []byte
+			seenCrypto := make(map[string]bool)
+			for _, client := range []*RealityClientConfig{candidate, clone} {
+				for range 2 {
+					raw, err := captureRealityClientHello(t, func(conn net.Conn) error {
+						_, err := client.ClientHandshake(context.Background(), conn)
+						return err
+					})
+					require.Error(t, err, "capture peer closes without a ServerHello")
+					hello := checkRealityWireAuthentication(t, raw, serverKey)
+					shape := realityRandomizedWireShape(t, raw)
+					if firstShape == nil {
+						firstShape = shape
+					}
+					require.Equal(t, firstShape, shape)
+					material := [][]byte{hello.Random, hello.SessionId}
+					hasP256 := false
+					for _, share := range hello.KeyShares {
+						hasP256 = hasP256 || share.Group == utls.CurveP256
+						if share.Group == utls.X25519MLKEM768 {
+							material = append(material, share.Data[:1184], share.Data[1184:])
+						} else {
+							material = append(material, share.Data)
+						}
+					}
+					for _, public := range material {
+						require.False(t, seenCrypto[string(public)], "ephemeral material must be fresh")
+						seenCrypto[string(public)] = true
+					}
+					if i >= 0 {
+						p256[hasP256] = true
+						shapes[string(shape)] = true
+					}
+					require.Equal(t, seed, *client.uClient.id.Seed)
+					require.Equal(t, seed, localSeed)
+				}
+			}
+			require.Equal(t, before, ordinaryShape(), "REALITY must not change ordinary randomized uTLS")
+			require.Equal(t, originalOptions, options, "caller options must remain unchanged")
+		})
+	}
+	require.Len(t, p256, 2, "fixed corpus must exercise optional P-256 both present and absent")
+	require.Greater(t, len(shapes), 1, "different seeds must retain different fingerprints")
+}
+
+func TestRealityRandomizedGenerationBoundaries(t *testing.T) {
+	serverKey, err := ecdh.X25519().GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	for _, name := range []string{"missing-hybrid", "TLS12", "nil-seed"} {
+		t.Run(name, func(t *testing.T) {
+			options := realityTestOptions("randomized")
+			options.Reality.PublicKey = base64.RawURLEncoding.EncodeToString(serverKey.PublicKey().Bytes())
+			options.Reality.ShortID = "0102030405060708"
+			config, err := NewRealityClient(context.Background(), logger.NOP(), "", options)
+			require.NoError(t, err)
+			candidate := config.(*RealityClientConfig)
+			seed := utls.PRNGSeed{}
+			weights := *candidate.uClient.id.Weights
+			candidate.uClient.id.Seed, candidate.uClient.id.Weights = &seed, &weights
+			wantError := ""
+			switch name {
+			case "missing-hybrid":
+				weights.CurveIDs_Append_X25519 = 0
+				weights.KeyShare_Append_RandomGroups = 0
+				ordinary, err := NewUTLSClient(context.Background(), logger.NOP(), "", options)
+				require.NoError(t, err)
+				ordinary.(*UTLSClientConfig).id = candidate.uClient.id
+				raw, err := captureRealityClientHello(t, func(conn net.Conn) error {
+					wrapped, err := ordinary.Client(conn)
+					if err != nil {
+						return err
+					}
+					return wrapped.HandshakeContext(context.Background())
+				})
+				require.Error(t, err)
+				hello := utls.UnmarshalClientHello(raw)
+				require.NotNil(t, hello)
+				require.NotContains(t, hello.SupportedCurves, utls.X25519MLKEM768)
+				for _, share := range hello.KeyShares {
+					require.NotEqual(t, utls.X25519MLKEM768, share.Group)
+				}
+			case "TLS12":
+				weights.TLSVersMax_Set_VersionTLS13 = 0
+				wantError = "TLS 1.3"
+			case "nil-seed":
+				candidate.uClient.id.Seed = nil
+				wantError = "seed"
+			}
+			raw, err := captureRealityClientHello(t, func(conn net.Conn) error {
+				_, err := candidate.ClientHandshake(context.Background(), conn)
+				return err
+			})
+			if wantError != "" {
+				require.ErrorContains(t, err, wantError)
+				require.Empty(t, raw, "invalid generated hello must fail before sending")
+				return
+			}
+			require.Error(t, err)
+			checkRealityWireAuthentication(t, raw, serverKey)
+			require.Equal(t, utls.PRNGSeed{}, seed)
+			require.Equal(t, float64(0), weights.CurveIDs_Append_X25519)
+			require.Equal(t, float64(0), weights.KeyShare_Append_RandomGroups)
+		})
+	}
+}
+
+func TestRealityRandomizedRetainsGenerationWeights(t *testing.T) {
+	id := randomizedFingerprint
+	weights := *id.Weights
+	seed := *id.Seed
+	defaults := utls.DefaultWeights
+	options := realityTestOptions("randomized")
+	config, err := NewRealityClient(context.Background(), logger.NOP(), "", options)
+	require.NoError(t, err)
+	candidate := config.(*RealityClientConfig)
+	require.Equal(t, weights, *candidate.uClient.id.Weights)
+	require.Same(t, id.Seed, candidate.uClient.id.Seed)
+	require.Same(t, id.Seed, candidate.Clone().(*RealityClientConfig).uClient.id.Seed)
+	require.Equal(t, weights, *randomizedFingerprint.Weights)
+	require.Equal(t, seed, *randomizedFingerprint.Seed)
+	require.Equal(t, defaults, utls.DefaultWeights)
 }
 
 func TestRealityPolicyDoesNotChangeOrdinaryUTLS(t *testing.T) {
