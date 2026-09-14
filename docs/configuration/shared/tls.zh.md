@@ -565,6 +565,26 @@ uTLS 是 "crypto/tls" 的一个分支，它提供了 ClientHello 指纹识别阻
 
 默认使用 chrome 指纹。
 
+对于 **REALITY 客户端**，实际 ClientHello 的 `key_share` 必须包含有效的
+`X25519MLKEM768`，且位于可选的 `X25519` share 之前。允许 GREASE 或其他 share
+在其前面；这不是 TLS 扩展顺序要求，也不要求服务端最终协商混合组。
+在 MetaCubeX/uTLS v1.8.7 中，`chrome`（也是默认值）是唯一合规的浏览器指纹。
+因此 REALITY 的 `random` 仅选择 Chrome，保持进程级选择生命周期，不会每次连接重新抽选。
+普通 uTLS 和 ShadowTLS 的选择行为不变。
+
+不合规的显式指纹在配置初始化时明确报错，不会重塑模板或悄悄替换。
+上文列出的已移除 `chrome_*` 别名在 REALITY 中也会被拒绝，请显式选择 `chrome`。
+每次连接发送前还会再次检查序列化后的 ClientHello。`randomized` 暂时保留原有生成策略：
+接受合规输出，但缺失必要 share 或顺序不合规的输出会在发送前报错，即使配置初始化已通过。
+需要稳定的 REALITY 握手时请使用 `chrome`。
+
+这些要求以 [Xray-core v26.9.9](https://github.com/XTLS/Xray-core/blob/52a412d9e2f5c2a5142b1b4e2ab3771dacb8b120/transport/internet/reality/reality.go)
+及其[固定版本 REALITY 实现](https://github.com/XTLS/REALITY/blob/8cdf7bf9c7f09cb9814bf08c3eb877f68b85fba8/tls.go)为准。
+基础认证在存在独立 X25519 share 时优先使用其私钥，否则使用混合 share 中的 X25519 私钥，
+不会使用 ML-KEM 共享秘密替代认证密钥。
+固定 Xray 的载荷互通及 Linux kTLS 回归测试的可重复执行步骤，见源码仓库中的
+`test/reality_xray.md` 和 `test/reality_xray.py`。
+
 ### ECH 字段
 
 ECH (Encrypted Client Hello) 是一个 TLS 扩展，它允许客户端加密其 ClientHello 的第一部分信息。

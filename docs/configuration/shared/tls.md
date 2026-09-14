@@ -568,6 +568,29 @@ Available fingerprint values:
 
 Chrome fingerprint will be used if empty.
 
+For **REALITY clients**, the actual ClientHello `key_share` must contain a valid
+`X25519MLKEM768` share before the optional `X25519` share. GREASE or other shares may
+precede it; this is not a TLS extension-order requirement and does not require the
+server to negotiate the hybrid group. With MetaCubeX/uTLS v1.8.7, `chrome` (also the
+default) is the only compliant browser fingerprint. REALITY `random` therefore
+selects only Chrome, retaining the process-wide selection lifecycle rather than
+selecting again for each connection. Ordinary uTLS and ShadowTLS selection are unchanged.
+
+Incompatible explicit fingerprints fail during configuration initialization rather
+than being rewritten or silently replaced. The retired `chrome_*` aliases listed
+above are also rejected for REALITY; select `chrome` explicitly. Each connection's
+serialized ClientHello is checked again before sending. `randomized` retains its
+existing generation policy for now: compliant outputs are accepted, but outputs
+without the required shares/order fail before sending, even when configuration
+initialization succeeded. Use `chrome` for reliable REALITY handshakes.
+
+These requirements follow [Xray-core v26.9.9](https://github.com/XTLS/Xray-core/blob/52a412d9e2f5c2a5142b1b4e2ab3771dacb8b120/transport/internet/reality/reality.go)
+and its [pinned REALITY implementation](https://github.com/XTLS/REALITY/blob/8cdf7bf9c7f09cb9814bf08c3eb877f68b85fba8/tls.go).
+Basic authentication uses the independent X25519 private key when its share is
+present, otherwise the hybrid share's X25519 private key—not the ML-KEM shared secret.
+For the reproducible pinned-Xray payload and Linux kTLS regression matrix, see
+`test/reality_xray.md` and `test/reality_xray.py` in the source repository.
+
 ### ECH Fields
 
 ECH (Encrypted Client Hello) is a TLS extension that allows a client to encrypt the first part of its ClientHello

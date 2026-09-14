@@ -30,7 +30,6 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
-	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/debug"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
@@ -63,9 +62,38 @@ func newRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
 		return nil, E.New("spoof is unsupported in reality")
 	}
 
+	switch options.UTLS.Fingerprint {
+	case "chrome_psk", "chrome_psk_shuffle", "chrome_padding_psk_shuffle", "chrome_pq", "chrome_pq_psk":
+		return nil, E.New("REALITY fingerprint is retired; explicitly select a compliant fingerprint such as chrome")
+	}
+
+	// REALITY random has one native compliant candidate in uTLS v1.8.7.
+	// Keep this selection separate from ordinary uTLS's process-wide choice.
+	if options.UTLS.Fingerprint == "random" {
+		utlsOptions := *options.UTLS
+		utlsOptions.Fingerprint = "chrome"
+		options.UTLS = &utlsOptions
+	}
 	uClient, err := newUTLSClient(ctx, logger, serverAddress, options, allowEmptyServerName)
 	if err != nil {
 		return nil, err
+	}
+
+	if maxVersion := uClient.(*UTLSClientConfig).config.MaxVersion; maxVersion != 0 && maxVersion < utls.VersionTLS13 {
+		return nil, E.New("REALITY requires TLS 1.3")
+	}
+	if options.UTLS.Fingerprint != "randomized" {
+		// Build a local probe to catch deterministic template errors at startup.
+		// This is not a substitute for validating each connection's serialized hello.
+		probeConfig := uClient.(*UTLSClientConfig).config.Clone()
+		probeConfig.SessionTicketsDisabled = true
+		probe := utls.UClient(nil, probeConfig, uClient.(*UTLSClientConfig).id)
+		if err = probe.BuildHandshakeState(); err != nil {
+			return nil, E.Cause(err, "REALITY fingerprint")
+		}
+		if _, err = realityAuthenticationKey(probe.HandshakeState.Hello.Raw, probe.HandshakeState.State13.KeyShareKeys); err != nil {
+			return nil, err
+		}
 	}
 
 	publicKey, err := base64.RawURLEncoding.DecodeString(options.Reality.PublicKey)
@@ -132,46 +160,41 @@ func (e *RealityClientConfig) Client(conn net.Conn) (Conn, error) {
 }
 
 func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn) (aTLS.Conn, error) {
-	verifier := &realityVerifier{
-		serverName: e.uClient.ServerName(),
-	}
 	uConfig := e.uClient.config.Clone()
+	uConn := utls.UClient(conn, uConfig, e.uClient.id)
+	return e.clientHandshake(ctx, uConn, uConfig)
+}
+
+func (e *RealityClientConfig) clientHandshake(ctx context.Context, uConn *utls.UConn, uConfig *utls.Config) (aTLS.Conn, error) {
+	verifier := &realityVerifier{UConn: uConn, serverName: e.uClient.ServerName()}
 	uConfig.InsecureSkipVerify = true
 	uConfig.SessionTicketsDisabled = true
 	uConfig.VerifyPeerCertificate = verifier.VerifyPeerCertificate
-	uConn := utls.UClient(conn, uConfig, e.uClient.id)
-	verifier.UConn = uConn
+	nextProtos := uConfig.NextProtos
 	err := uConn.BuildHandshakeState()
 	if err != nil {
 		return nil, err
 	}
-	for _, extension := range uConn.Extensions {
-		if ce, ok := extension.(*utls.SupportedCurvesExtension); ok {
-			ce.Curves = common.Filter(ce.Curves, func(curveID utls.CurveID) bool {
-				return curveID != utls.X25519MLKEM768
-			})
-		}
-		if ks, ok := extension.(*utls.KeyShareExtension); ok {
-			ks.KeyShares = common.Filter(ks.KeyShares, func(share utls.KeyShare) bool {
-				return share.Group != utls.X25519MLKEM768
-			})
-		}
-	}
-	err = uConn.BuildHandshakeState()
-	if err != nil {
-		return nil, err
-	}
-
-	if len(uConfig.NextProtos) > 0 {
+	if len(nextProtos) > 0 {
 		for _, extension := range uConn.Extensions {
 			if alpnExtension, isALPN := extension.(*utls.ALPNExtension); isALPN {
-				alpnExtension.AlpnProtocols = uConfig.NextProtos
+				alpnExtension.AlpnProtocols = nextProtos
 				break
 			}
 		}
 	}
 
+	// Serialize ALPN and all other extensions before checking/authenticating the
+	// bytes. uTLS v1.8.7 rebuilds from these same extensions at handshake entry;
+	// SessionTicketsDisabled prevents its session controller from patching them.
+	if err = uConn.BuildHandshakeState(); err != nil {
+		return nil, err
+	}
 	hello := uConn.HandshakeState.Hello
+	ecdheKey, err := realityAuthenticationKey(hello.Raw, uConn.HandshakeState.State13.KeyShareKeys)
+	if err != nil {
+		return nil, err
+	}
 	hello.SessionId = make([]byte, 32)
 	copy(hello.Raw[39:], hello.SessionId)
 
@@ -188,20 +211,9 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	hello.SessionId[2] = 11
 	binary.BigEndian.PutUint32(hello.SessionId[4:], uint32(time.Now().Unix()))
 	copy(hello.SessionId[8:], e.shortID[:])
-	if debug.Enabled {
-		fmt.Printf("REALITY hello.sessionId[:16]: %v\n", hello.SessionId[:16])
-	}
 	publicKey, err := ecdh.X25519().NewPublicKey(e.publicKey)
 	if err != nil {
 		return nil, err
-	}
-	keyShareKeys := uConn.HandshakeState.State13.KeyShareKeys
-	if keyShareKeys == nil {
-		return nil, E.New("nil KeyShareKeys")
-	}
-	ecdheKey := keyShareKeys.Ecdhe
-	if ecdheKey == nil {
-		return nil, E.New("nil ecdheKey")
 	}
 	authKey, err := ecdheKey.ECDH(publicKey)
 	if err != nil {
@@ -219,10 +231,6 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	aesGcmCipher, _ := cipher.NewGCM(aesBlock)
 	aesGcmCipher.Seal(hello.SessionId[:0], hello.Random[20:], hello.SessionId[:16], hello.Raw)
 	copy(hello.Raw[39:], hello.SessionId)
-	if debug.Enabled {
-		fmt.Printf("REALITY hello.sessionId: %v\n", hello.SessionId)
-		fmt.Printf("REALITY uConn.AuthKey: %v\n", authKey)
-	}
 
 	err = uConn.HandshakeContext(ctx)
 	if err != nil {
