@@ -9,6 +9,7 @@ import (
 	"github.com/sagernet/sing-box/common/xray/utils"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/schema"
+	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/json"
 	"github.com/sagernet/sing/common/json/badjson"
@@ -133,16 +134,16 @@ type V2RayXHTTPBaseOptions struct {
 	Path                 string                     `json:"path,omitempty"`
 	Headers              map[string]string          `json:"headers,omitempty"`
 	DomainStrategy       DomainStrategy             `json:"domain_strategy,omitempty"`
-	XPaddingBytes        badoption.Range[int]       `json:"x_padding_bytes"`
+	XPaddingBytes        *badoption.Range[int]      `json:"x_padding_bytes,omitempty"`
 	NoGRPCHeader         bool                       `json:"no_grpc_header,omitempty"`
 	NoSSEHeader          bool                       `json:"no_sse_header,omitempty"`
-	ScMaxEachPostBytes   *badoption.Range[int]      `json:"sc_max_each_post_bytes"`
-	ScMinPostsIntervalMs *badoption.Range[int]      `json:"sc_min_posts_interval_ms"`
+	ScMaxEachPostBytes   *badoption.Range[int]      `json:"sc_max_each_post_bytes,omitempty"`
+	ScMinPostsIntervalMs *badoption.Range[int]      `json:"sc_min_posts_interval_ms,omitempty"`
 	ScMaxBufferedPosts   int64                      `json:"sc_max_buffered_posts,omitempty"`
-	ScStreamUpServerSecs *badoption.Range[int]      `json:"sc_stream_up_server_secs"`
-	ServerMaxHeaderBytes int                        `json:"server_max_header_bytes"`
+	ScStreamUpServerSecs *badoption.Range[int]      `json:"sc_stream_up_server_secs,omitempty"`
+	ServerMaxHeaderBytes int                        `json:"server_max_header_bytes,omitempty"`
 	TrustedXForwardedFor badoption.Listable[string] `json:"trusted_x_forwarded_for,omitempty"`
-	Xmux                 *V2RayXHTTPXmuxOptions     `json:"xmux"`
+	Xmux                 *V2RayXHTTPXmuxOptions     `json:"xmux,omitempty"`
 	XPaddingObfsMode     bool                       `json:"x_padding_obfs_mode,omitempty"`
 	XPaddingKey          string                     `json:"x_padding_key,omitempty"`
 	XPaddingHeader       string                     `json:"x_padding_header,omitempty"`
@@ -157,15 +158,15 @@ type V2RayXHTTPBaseOptions struct {
 	UplinkDataKey        string                     `json:"uplink_data_key,omitempty"`
 	UplinkChunkSize      *badoption.Range[int]      `json:"uplink_chunk_size,omitempty"`
 	SessionIDTable       string                     `json:"session_id_table,omitempty"`
-	SessionIDLength      badoption.Range[int]       `json:"session_id_length,omitempty"`
+	SessionIDLength      badoption.Range[int]       `json:"session_id_length,omitempty,omitzero"`
 	CongestionController string                     `json:"congestion_controller,omitempty"`
 	CWND                 int                        `json:"cwnd,omitempty"`
 }
 
 type _V2RayXHTTPOptions struct {
-	Mode string `json:"mode"`
+	Mode string `json:"mode,omitempty"`
 	V2RayXHTTPBaseOptions
-	Download *V2RayXHTTPDownloadOptions `json:"download"`
+	Download *V2RayXHTTPDownloadOptions `json:"download,omitempty"`
 }
 
 type V2RayXHTTPOptions _V2RayXHTTPOptions
@@ -208,30 +209,38 @@ func (c *V2RayXHTTPOptions) UnmarshalJSON(bytes []byte) error {
 	if err != nil {
 		return err
 	}
+	_, err = c.Normalize()
+	return err
+}
+
+// Normalize applies runtime defaults without changing the configuration used by format.
+func (c V2RayXHTTPOptions) Normalize() (V2RayXHTTPOptions, error) {
 	switch c.Mode {
 	case "":
 		c.Mode = "auto"
 	case "auto", "packet-up", "stream-up", "stream-one":
 	default:
-		return E.New("unsupported mode: " + c.Mode)
+		return V2RayXHTTPOptions{}, E.New("unsupported mode: " + c.Mode)
 	}
 	if c.Download != nil && c.Mode == "stream-one" {
-		return E.New(`can not use "download" in "stream-one" mode`)
+		return V2RayXHTTPOptions{}, E.New(`can not use "download" in "stream-one" mode`)
 	}
-	err = checkV2RayXHTTPBaseOptions(c.Mode, &c.V2RayXHTTPBaseOptions)
+	err := normalizeV2RayXHTTPBaseOptions(c.Mode, &c.V2RayXHTTPBaseOptions)
 	if err != nil {
-		return err
+		return V2RayXHTTPOptions{}, err
 	}
 	if c.Download != nil {
-		err = checkV2RayXHTTPBaseOptions(c.Mode, &c.Download.V2RayXHTTPBaseOptions)
+		download := *c.Download
+		c.Download = &download
+		err = normalizeV2RayXHTTPBaseOptions(c.Mode, &download.V2RayXHTTPBaseOptions)
 		if err != nil {
-			return err
+			return V2RayXHTTPOptions{}, err
 		}
 	}
-	return nil
+	return c, nil
 }
 
-func checkV2RayXHTTPBaseOptions(mode string, options *V2RayXHTTPBaseOptions) error {
+func normalizeV2RayXHTTPBaseOptions(mode string, options *V2RayXHTTPBaseOptions) error {
 	// Priority (client): host > serverName > address
 	for k := range options.Headers {
 		if strings.ToLower(k) == "host" {
@@ -239,7 +248,7 @@ func checkV2RayXHTTPBaseOptions(mode string, options *V2RayXHTTPBaseOptions) err
 		}
 	}
 
-	if options.XPaddingBytes.From <= 0 || options.XPaddingBytes.To <= 0 {
+	if options.XPaddingBytes != nil && (options.XPaddingBytes.From <= 0 || options.XPaddingBytes.To <= 0) {
 		return E.New("x_padding_bytes cannot be disabled")
 	}
 
@@ -360,20 +369,19 @@ func checkV2RayXHTTPBaseOptions(mode string, options *V2RayXHTTPBaseOptions) err
 		return E.New("`scMaxEachPostBytes` should be bigger than 0")
 	}
 
-	if options.Xmux == nil {
-		options.Xmux = &V2RayXHTTPXmuxOptions{}
-	}
-	if options.Xmux.MaxConnections.To > 0 && options.Xmux.MaxConcurrency.To > 0 {
+	// Replace the pointer instead of writing through it: the caller's configuration stays as written.
+	xmux := common.PtrValueOrDefault(options.Xmux)
+	if xmux.GetNormalizedMaxConnections().To > 0 && xmux.GetNormalizedMaxConcurrency().To > 0 {
 		return E.New("max_connections cannot be specified together with max_concurrency")
 	}
-	if *options.Xmux == (V2RayXHTTPXmuxOptions{}) {
-		options.Xmux.MaxConnections.From = 3
-		options.Xmux.MaxConnections.To = 3
-		options.Xmux.HMaxRequestTimes.From = 600
-		options.Xmux.HMaxRequestTimes.To = 900
-		options.Xmux.HMaxReusableSecs.From = 1800
-		options.Xmux.HMaxReusableSecs.To = 3000
+	if xmux.isZero() {
+		xmux = V2RayXHTTPXmuxOptions{
+			MaxConnections:   &badoption.Range[int]{From: 3, To: 3},
+			HMaxRequestTimes: &badoption.Range[int]{From: 600, To: 900},
+			HMaxReusableSecs: &badoption.Range[int]{From: 1800, To: 3000},
+		}
 	}
+	options.Xmux = &xmux
 	return nil
 }
 
@@ -410,13 +418,13 @@ func (c *V2RayXHTTPBaseOptions) GetRequestHeader() http.Header {
 }
 
 func (c *V2RayXHTTPBaseOptions) GetNormalizedXPaddingBytes() badoption.Range[int] {
-	if c.XPaddingBytes.To == 0 {
+	if c.XPaddingBytes == nil {
 		return badoption.Range[int]{
 			From: 100,
 			To:   1000,
 		}
 	}
-	return c.XPaddingBytes
+	return *c.XPaddingBytes
 }
 
 func (c *V2RayXHTTPBaseOptions) GetNormalizedUplinkHTTPMethod() string {
@@ -548,32 +556,43 @@ func (c *V2RayXHTTPBaseOptions) GetNormalizedSeqKey() string {
 }
 
 type V2RayXHTTPXmuxOptions struct {
-	MaxConcurrency   badoption.Range[int] `json:"max_concurrency"`
-	MaxConnections   badoption.Range[int] `json:"max_connections"`
-	CMaxReuseTimes   badoption.Range[int] `json:"c_max_reuse_times"`
-	HMaxRequestTimes badoption.Range[int] `json:"h_max_request_times"`
-	HMaxReusableSecs badoption.Range[int] `json:"h_max_reusable_secs"`
-	HKeepAlivePeriod int64                `json:"h_keep_alive_period"`
+	MaxConcurrency   *badoption.Range[int] `json:"max_concurrency,omitempty"`
+	MaxConnections   *badoption.Range[int] `json:"max_connections,omitempty"`
+	CMaxReuseTimes   *badoption.Range[int] `json:"c_max_reuse_times,omitempty"`
+	HMaxRequestTimes *badoption.Range[int] `json:"h_max_request_times,omitempty"`
+	HMaxReusableSecs *badoption.Range[int] `json:"h_max_reusable_secs,omitempty"`
+	HKeepAlivePeriod *int64                `json:"h_keep_alive_period,omitempty"`
+}
+
+// isZero reports whether no limit is set. Explicit zeros count as unset.
+func (m *V2RayXHTTPXmuxOptions) isZero() bool {
+	var unset badoption.Range[int]
+	return m.GetNormalizedMaxConcurrency() == unset &&
+		m.GetNormalizedMaxConnections() == unset &&
+		m.GetNormalizedCMaxReuseTimes() == unset &&
+		m.GetNormalizedHMaxRequestTimes() == unset &&
+		m.GetNormalizedHMaxReusableSecs() == unset &&
+		common.PtrValueOrDefault(m.HKeepAlivePeriod) == 0
 }
 
 func (m *V2RayXHTTPXmuxOptions) GetNormalizedMaxConcurrency() badoption.Range[int] {
-	return m.MaxConcurrency
+	return common.PtrValueOrDefault(m.MaxConcurrency)
 }
 
 func (m *V2RayXHTTPXmuxOptions) GetNormalizedMaxConnections() badoption.Range[int] {
-	return m.MaxConnections
+	return common.PtrValueOrDefault(m.MaxConnections)
 }
 
 func (m *V2RayXHTTPXmuxOptions) GetNormalizedCMaxReuseTimes() badoption.Range[int] {
-	return m.CMaxReuseTimes
+	return common.PtrValueOrDefault(m.CMaxReuseTimes)
 }
 
 func (m *V2RayXHTTPXmuxOptions) GetNormalizedHMaxRequestTimes() badoption.Range[int] {
-	return m.HMaxRequestTimes
+	return common.PtrValueOrDefault(m.HMaxRequestTimes)
 }
 
 func (m *V2RayXHTTPXmuxOptions) GetNormalizedHMaxReusableSecs() badoption.Range[int] {
-	return m.HMaxReusableSecs
+	return common.PtrValueOrDefault(m.HMaxReusableSecs)
 }
 
 type V2RayKCPOptions struct {

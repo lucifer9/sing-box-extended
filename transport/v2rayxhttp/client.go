@@ -32,6 +32,7 @@ import (
 	"github.com/sagernet/sing/common/ntp"
 	sHTTP "github.com/sagernet/sing/protocol/http"
 	"github.com/sagernet/sing/service"
+
 	"golang.org/x/net/http2"
 )
 
@@ -47,6 +48,10 @@ type Client struct {
 }
 
 func NewClient(ctx context.Context, logger log.ContextLogger, dialer N.Dialer, serverAddr M.Socksaddr, options option.V2RayXHTTPOptions, tlsConfig tls.Config) (adapter.V2RayClientTransport, error) {
+	options, err := options.Normalize()
+	if err != nil {
+		return nil, err
+	}
 	if tlsConfig != nil && len(tlsConfig.NextProtos()) == 0 {
 		tlsConfig.SetNextProtos([]string{"h2"})
 	}
@@ -318,7 +323,7 @@ func createHTTPClient(ctx context.Context, dest M.Socksaddr, dialer N.Dialer, op
 	}
 	var keepAlivePeriod time.Duration
 	if options.Xmux != nil {
-		keepAlivePeriod = time.Duration(options.Xmux.HKeepAlivePeriod) * time.Second
+		keepAlivePeriod = time.Duration(common.PtrValueOrDefault(options.Xmux.HKeepAlivePeriod)) * time.Second
 	}
 	var transport http.RoundTripper
 	switch httpVersion {
