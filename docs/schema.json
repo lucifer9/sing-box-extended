@@ -13921,6 +13921,12 @@
         },
         "short_id": {
           "type": "string"
+        },
+        "mldsa65_verify": {
+          "type": "string"
+        },
+        "support_x25519mlkem768": {
+          "type": "boolean"
         }
       },
       "additionalProperties": false
