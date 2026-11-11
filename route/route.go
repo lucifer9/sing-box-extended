@@ -395,6 +395,10 @@ func (r *Router) PreMatch(metadata adapter.InboundContext, firstPacket []byte) a
 			applyRouteOptionsOverride(&metadata, action)
 		case *R.RuleActionRoute:
 			applyRouteOptionsOverride(&metadata, &action.RuleActionRouteOptions)
+			if r.shouldUseSniffedDestination(&metadata, action) {
+				// IP-only flow forwarding would bypass the outbound's domain handling.
+				return continueResult
+			}
 			return r.preMatchFlow(ctx, &metadata, packetDestination, currentRule, action.Outbound)
 		case *R.RuleActionBypass:
 			applyRouteOptionsOverride(&metadata, &action.RuleActionRouteOptions)
@@ -437,7 +441,24 @@ func (r *Router) PreMatch(metadata adapter.InboundContext, firstPacket []byte) a
 			return continueResult
 		}
 	}
-	return r.preMatchFlow(ctx, &metadata, packetDestination, nil, "")
+	if r.shouldUseSniffedDestination(&metadata, nil) {
+		return continueResult
+	}
+	return r.preMatchFlow(ctx, &metadata, packetDestination, nil, r.final)
+}
+
+// A nil action represents final/default-outbound routing without a rule override.
+func (r *Router) shouldUseSniffedDestination(metadata *adapter.InboundContext, action *R.RuleActionRoute) bool {
+	enabled := r.useSniffedDestination
+	if action != nil {
+		if action.UseSniffedDestination != nil {
+			enabled = *action.UseSniffedDestination
+		} else if action.OverrideAddress.IsValid() {
+			// An explicit static target takes precedence over the inherited default.
+			enabled = false
+		}
+	}
+	return enabled && metadata.Destination.IsIP() && M.IsDomainName(metadata.SniffedDomain)
 }
 
 func applyRouteOptionsOverride(metadata *adapter.InboundContext, routeOptions *R.RuleActionRouteOptions) {
@@ -717,6 +738,24 @@ match:
 			selectedRuleIndex = currentRuleIndex
 			break match
 		}
+	}
+	var routeAction *R.RuleActionRoute
+	if selectedRule != nil {
+		var isRoute bool
+		routeAction, isRoute = selectedRule.Action().(*R.RuleActionRoute)
+		if !isRoute {
+			return
+		}
+	}
+	if r.shouldUseSniffedDestination(metadata, routeAction) {
+		// Keep the client target for UDP response mapping; rules have already matched.
+		if !metadata.RouteOriginalDestination.IsValid() {
+			metadata.RouteOriginalDestination = metadata.Destination
+		}
+		originalDestination := metadata.Destination
+		metadata.Destination = M.Socksaddr{Fqdn: metadata.SniffedDomain, Port: metadata.Destination.Port}
+		metadata.DestinationAddresses = nil
+		r.logger.DebugContext(ctx, "use sniffed destination: ", originalDestination, " => ", metadata.Destination)
 	}
 	return
 }
