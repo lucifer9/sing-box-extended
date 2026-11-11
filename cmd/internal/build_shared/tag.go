@@ -7,12 +7,16 @@ import (
 	"github.com/sagernet/sing/common/shell"
 )
 
+// Build artifacts may have moving tags such as rc-test. Only version tags
+// participate in version discovery.
+const versionTagPattern = "v[0-9]*"
+
 func ReadTag() (string, error) {
-	currentTag, err := shell.Exec("git", "describe", "--tags").ReadOutput()
+	currentTag, err := shell.Exec("git", "describe", "--tags", "--match", versionTagPattern).ReadOutput()
 	if err != nil {
 		return currentTag, err
 	}
-	currentTagRev, _ := shell.Exec("git", "describe", "--tags", "--abbrev=0").ReadOutput()
+	currentTagRev, _ := shell.Exec("git", "describe", "--tags", "--match", versionTagPattern, "--abbrev=0").ReadOutput()
 	if currentTagRev == currentTag {
 		return currentTag[1:], nil
 	}
@@ -22,13 +26,13 @@ func ReadTag() (string, error) {
 }
 
 func ReadTagVersionRev() (badversion.Version, error) {
-	currentTagRev := common.Must1(shell.Exec("git", "describe", "--tags", "--abbrev=0").ReadOutput())
+	currentTagRev := common.Must1(shell.Exec("git", "describe", "--tags", "--match", versionTagPattern, "--abbrev=0").ReadOutput())
 	return badversion.Parse(currentTagRev[1:]), nil
 }
 
 func ReadTagVersion() (badversion.Version, error) {
-	currentTag := common.Must1(shell.Exec("git", "describe", "--tags").ReadOutput())
-	currentTagRev := common.Must1(shell.Exec("git", "describe", "--tags", "--abbrev=0").ReadOutput())
+	currentTag := common.Must1(shell.Exec("git", "describe", "--tags", "--match", versionTagPattern).ReadOutput())
+	currentTagRev := common.Must1(shell.Exec("git", "describe", "--tags", "--match", versionTagPattern, "--abbrev=0").ReadOutput())
 	version := badversion.Parse(currentTagRev[1:])
 	if currentTagRev != currentTag {
 		if version.PreReleaseIdentifier == "" {
