@@ -37,6 +37,7 @@ icon: material/alert-decagram
     "rules": [],
     "rule_set": [],
     "final": "",
+    "use_sniffed_destination": false,
     "auto_detect_interface": false,
     "override_android_vpn": false,
     "default_interface": "",
@@ -78,6 +79,33 @@ List of [rule-set](/configuration/rule-set/)
 #### final
 
 Default outbound tag. the first outbound will be used if empty.
+
+#### use_sniffed_destination
+
+Optional, defaults to `false`. Sets the default for [sniffed destination selection](./rule_action.md#use_sniffed_destination) on terminal `route` actions and for `final` routing when no terminal rule matches. When `final` is omitted, the default outbound uses this setting as well.
+
+A `route` rule inherits this setting when its field is omitted. An explicit `true` or `false` overrides the global setting. An `override_address` on the same rule takes precedence over inheritance; an explicit `true` still conflicts with a non-empty `override_address`. Other actions, including `reject`, `hijack-dns`, and `bypass`, are not affected.
+
+This option does not enable sniffing; place a `sniff` action before terminal route rules. Destination replacement occurs after matching, only for an IP target with a valid sniffed domain. Without a valid sniffed domain, or when the target is already a domain, the destination is unchanged.
+
+This example uses sniffed domains for fallback routing while preserving the original target for one direct rule:
+
+```json
+{
+  "route": {
+    "use_sniffed_destination": true,
+    "rules": [
+      { "action": "sniff" },
+      {
+        "domain_suffix": ["example.cn"],
+        "outbound": "direct",
+        "use_sniffed_destination": false
+      }
+    ],
+    "final": "proxy"
+  }
+}
+```
 
 #### auto_detect_interface
 
