@@ -324,7 +324,11 @@ of accepted values and platform notes.
 {
   "action": "sniff",
   "sniffer": [],
-  "timeout": ""
+  "timeout": "",
+  "exclude_domain": [],
+  "exclude_domain_suffix": [],
+  "exclude_domain_keyword": [],
+  "exclude_domain_regex": []
 }
 ```
 
@@ -345,6 +349,30 @@ Available protocol values an be found on in [Protocol Sniff](../sniff/)
 Timeout for sniffing.
 
 `300ms` is used by default.
+
+#### exclude_domain
+
+Discard the sniffed domain if it matches any of the `exclude_domain*` fields.
+
+The sniffed protocol is kept, but the domain is not used for rule matching or by
+[use_sniffed_destination](#use_sniffed_destination), as if no domain was sniffed.
+
+The fields are matched in the same way as the `domain`, `domain_suffix`,
+`domain_keyword` and `domain_regex` fields of a [route rule](../rule/).
+
+`exclude_domain` matches the full domain.
+
+#### exclude_domain_suffix
+
+Discard the sniffed domain if it matches the domain suffix.
+
+#### exclude_domain_keyword
+
+Discard the sniffed domain if it contains the keyword.
+
+#### exclude_domain_regex
+
+Discard the sniffed domain if it matches the regular expression.
 
 ### resolve
 

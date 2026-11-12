@@ -287,7 +287,11 @@ UDP 连接超时时间。
 {
   "action": "sniff",
   "sniffer": [],
-  "timeout": ""
+  "timeout": "",
+  "exclude_domain": [],
+  "exclude_domain_suffix": [],
+  "exclude_domain_keyword": [],
+  "exclude_domain_regex": []
 }
 ```
 
@@ -308,6 +312,30 @@ UDP 连接超时时间。
 探测超时时间。
 
 默认使用 300ms。
+
+#### exclude_domain
+
+如果嗅探到的域名匹配任一 `exclude_domain*` 字段，则丢弃该域名。
+
+嗅探到的协议会保留，但域名不会用于规则匹配，也不会被
+[use_sniffed_destination](#use_sniffed_destination) 使用，如同没有嗅探到域名。
+
+匹配方式与 [路由规则](../rule/) 的 `domain`、`domain_suffix`、`domain_keyword`
+和 `domain_regex` 字段相同。
+
+`exclude_domain` 匹配完整域名。
+
+#### exclude_domain_suffix
+
+如果嗅探到的域名匹配域名后缀，则丢弃该域名。
+
+#### exclude_domain_keyword
+
+如果嗅探到的域名包含关键字，则丢弃该域名。
+
+#### exclude_domain_regex
+
+如果嗅探到的域名匹配正则表达式，则丢弃该域名。
 
 ### resolve
 

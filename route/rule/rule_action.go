@@ -118,7 +118,7 @@ func NewRuleAction(ctx context.Context, logger logger.ContextLogger, action opti
 			SnifferNames: action.SniffOptions.Sniffer,
 			Timeout:      time.Duration(action.SniffOptions.Timeout),
 		}
-		return sniffAction, sniffAction.build()
+		return sniffAction, sniffAction.build(action.SniffOptions)
 	case C.RuleActionTypeResolve:
 		return &RuleActionResolve{
 			Server:                 action.ResolveOptions.Server,
@@ -532,13 +532,45 @@ type RuleActionSniff struct {
 	Timeout        time.Duration
 	// Deprecated
 	OverrideDestination bool
+
+	excludedDomains []RuleItem
 }
 
 func (r *RuleActionSniff) Type() string {
 	return C.RuleActionTypeSniff
 }
 
-func (r *RuleActionSniff) build() error {
+// DomainExcluded reports whether the domain just sniffed into metadata is excluded.
+func (r *RuleActionSniff) DomainExcluded(metadata *adapter.InboundContext) bool {
+	if metadata.SniffedDomain == "" {
+		return false
+	}
+	for _, item := range r.excludedDomains {
+		if item.Match(metadata) {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *RuleActionSniff) build(options option.RouteActionSniff) error {
+	if len(options.ExcludeDomain) > 0 || len(options.ExcludeDomainSuffix) > 0 {
+		item, err := NewDomainItem(options.ExcludeDomain, options.ExcludeDomainSuffix)
+		if err != nil {
+			return E.Cause(err, "exclude domain")
+		}
+		r.excludedDomains = append(r.excludedDomains, item)
+	}
+	if len(options.ExcludeDomainKeyword) > 0 {
+		r.excludedDomains = append(r.excludedDomains, NewDomainKeywordItem(options.ExcludeDomainKeyword))
+	}
+	if len(options.ExcludeDomainRegex) > 0 {
+		item, err := NewDomainRegexItem(options.ExcludeDomainRegex)
+		if err != nil {
+			return E.Cause(err, "exclude domain_regex")
+		}
+		r.excludedDomains = append(r.excludedDomains, item)
+	}
 	for _, name := range r.SnifferNames {
 		switch name {
 		case C.ProtocolTLS:

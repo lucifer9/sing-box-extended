@@ -366,6 +366,7 @@ func (r *Router) PreMatch(metadata adapter.InboundContext, firstPacket []byte) a
 			if len(packetSniffers) == 0 {
 				packetSniffers = defaultPacketSniffers
 			}
+			previousDomain := metadata.Domain
 			sniffErr := sniff.PeekPacket(ctx, &metadata, firstPacket, packetSniffers...)
 			metadata.SnifferNames = action.SnifferNames
 			metadata.SniffError = sniffErr
@@ -375,6 +376,7 @@ func (r *Router) PreMatch(metadata adapter.InboundContext, firstPacket []byte) a
 				}
 				continue
 			}
+			r.excludeSniffedDomain(ctx, &metadata, action, previousDomain)
 			//goland:noinspection GoDeprecation
 			if action.OverrideDestination && M.IsDomainName(metadata.Domain) {
 				metadata.Destination = M.Socksaddr{
@@ -760,6 +762,16 @@ match:
 	return
 }
 
+// excludeSniffedDomain discards an excluded sniffed domain, keeping the sniffed protocol.
+func (r *Router) excludeSniffedDomain(ctx context.Context, metadata *adapter.InboundContext, action *R.RuleActionSniff, previousDomain string) {
+	if !action.DomainExcluded(metadata) {
+		return
+	}
+	r.logger.DebugContext(ctx, "sniffed domain excluded: ", metadata.SniffedDomain)
+	metadata.Domain = previousDomain
+	metadata.SniffedDomain = ""
+}
+
 func (r *Router) actionSniff(
 	ctx context.Context, metadata *adapter.InboundContext, action *R.RuleActionSniff,
 	inputConn net.Conn, inputPacketConn N.PacketConn, inputBuffers []*buf.Buffer, inputPacketBuffers []*N.PacketBuffer,
@@ -771,6 +783,7 @@ func (r *Router) actionSniff(
 		r.logger.DebugContext(ctx, "duplicate sniff skipped")
 		return
 	}
+	previousDomain := metadata.Domain
 	if inputConn != nil {
 		if len(action.StreamSniffers) == 0 && len(action.PacketSniffers) > 0 {
 			return
@@ -804,6 +817,7 @@ func (r *Router) actionSniff(
 		metadata.SnifferNames = action.SnifferNames
 		metadata.SniffError = err
 		if err == nil {
+			r.excludeSniffedDomain(ctx, metadata, action, previousDomain)
 			//goland:noinspection GoDeprecation
 			if action.OverrideDestination && M.IsDomainName(metadata.Domain) {
 				metadata.Destination = M.Socksaddr{
@@ -927,6 +941,7 @@ func (r *Router) actionSniff(
 		}
 	finally:
 		if err == nil {
+			r.excludeSniffedDomain(ctx, metadata, action, previousDomain)
 			//goland:noinspection GoDeprecation
 			if action.OverrideDestination && M.IsDomainName(metadata.Domain) {
 				metadata.Destination = M.Socksaddr{

@@ -93,3 +93,13 @@ func TestDNSRuleActionRespondRejectsUnknownFields(t *testing.T) {
 	err := json.UnmarshalContext(context.Background(), []byte(`{"action":"respond","disable_cache":true}`), &action)
 	require.ErrorContains(t, err, "unknown field")
 }
+
+func TestRouteActionSniffExcludeDomain(t *testing.T) {
+	input := `{"action":"sniff","exclude_domain":"a.example.org","exclude_domain_suffix":[".example.com","example.net"],"exclude_domain_keyword":"push","exclude_domain_regex":"^mijia "}`
+	var action RuleAction
+	require.NoError(t, json.Unmarshal([]byte(input), &action))
+	require.Equal(t, []string{".example.com", "example.net"}, []string(action.SniffOptions.ExcludeDomainSuffix))
+	encoded, err := json.Marshal(action)
+	require.NoError(t, err)
+	require.JSONEq(t, input, string(encoded))
+}
